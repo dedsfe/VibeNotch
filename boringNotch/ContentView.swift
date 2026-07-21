@@ -932,6 +932,12 @@ class AIAgentWrapper: ObservableObject {
             if !tty.isEmpty { sessions[i].tty = tty }
             if !term.isEmpty { sessions[i].term = term }
         } else {
+            // Mesma aba de terminal = mesma linha. Um restart ou /clear
+            // troca o session_id, mas o tty fica -- sem isso cada sessao
+            // nova viraria uma linha fantasma da mesma aba.
+            if !tty.isEmpty {
+                sessions.removeAll { $0.tty == tty && !$0.isWaiting }
+            }
             sessions.append(AISession(
                 id: id, source: source, name: name, project: project,
                 title: title, tty: tty, term: term,

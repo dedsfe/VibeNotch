@@ -27,9 +27,15 @@ NOMES = {
     "codex": "Codex",
 }
 
+# Eventos que so registram presenca: manda e sai, sem esperar nem
+# recolher a ilha -- e um "oi, existo", nao um "acabei".
+SO_REGISTRA = {"SessionStart", "UserPromptSubmit"}
+
 # evento -> (state, verbo). Cobre Claude, Gemini/Antigravity e Codex.
 ESTADOS = {
     # Claude Code
+    "SessionStart": ("working", "abriu"),
+    "UserPromptSubmit": ("working", "trabalhando"),
     "Stop": ("idle", "terminou"),
     "StopFailure": ("erro", "parou com erro"),
     "SubagentStop": ("idle", "subagente terminou"),
@@ -194,7 +200,10 @@ def main():
     if not ok:
         return  # app fechado, nada a fazer
 
-    time.sleep(TEMPO_NA_TELA)
+    # "Oi, existo" entra na lista mas nao merece banner de 5s na tela:
+    # recolhe ja. O close mantem a sessao na lista.
+    if evento not in SO_REGISTRA:
+        time.sleep(TEMPO_NA_TELA)
     # Sem o id, a ilha nao sabe qual sessao recolher e todas ficavam
     # acumuladas na lista pra sempre.
     enviar({
