@@ -245,7 +245,12 @@ struct ContentView: View {
         .onChange(of: agentWrapper.sessions.count) { _, count in
             if count > 0 {
                 coordinator.currentView = .terminal
-                vm.open()
+                // Sessao nova so abre a ilha se tem algo pra mostrar:
+                // batimento silencioso fica na pill do notch fechado.
+                if agentWrapper.waitingCount > 0 || agentWrapper.isRequestingPermission
+                    || agentWrapper.isShowingMessage {
+                    vm.open()
+                }
             } else {
                 vm.close()
             }
@@ -309,6 +314,70 @@ struct ContentView: View {
                       } else if coordinator.sneakPeek.show && Defaults[.inlineHUD] && (coordinator.sneakPeek.type != .music) && (coordinator.sneakPeek.type != .battery) && vm.notchState == .closed {
                           InlineHUD(type: $coordinator.sneakPeek.type, value: $coordinator.sneakPeek.value, icon: $coordinator.sneakPeek.icon, hoverAnimation: $isHovering, gestureProgress: $gestureProgress)
                               .transition(.opacity)
+                      } else if vm.notchState == .closed && !vm.hideOnClosed
+                          && !coordinator.expandingView.show
+                          && !agentWrapper.doneBanner.isEmpty {
+                          // Estado "pronto": expansao parcial de ~5s com o
+                          // titulo da conversa, sem abrir a ilha inteira.
+                          // Lados com a MESMA largura: o vao preto precisa
+                          // cair exatamente sobre o notch fisico, senao o
+                          // texto some embaixo dele.
+                          HStack(spacing: 0) {
+                              HStack(spacing: 5) {
+                                  Circle()
+                                      .fill(Color.green)
+                                      .frame(width: 5, height: 5)
+                                  Text("pronto")
+                                      .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                      .foregroundColor(.white.opacity(0.85))
+                              }
+                              .frame(width: 150, alignment: .leading)
+
+                              Rectangle()
+                                  .fill(.black)
+                                  .frame(width: vm.closedNotchSize.width + 10)
+
+                              Text(agentWrapper.doneBanner)
+                                  .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                  .foregroundColor(.white.opacity(0.7))
+                                  .lineLimit(1)
+                                  .truncationMode(.tail)
+                                  .frame(width: 150, alignment: .trailing)
+                          }
+                          .frame(height: vm.effectiveClosedNotchHeight, alignment: .center)
+                          .transition(.blurReplace)
+                      } else if vm.notchState == .closed && !vm.hideOnClosed
+                          && !coordinator.expandingView.show
+                          && (agentWrapper.waitingCount > 0 || agentWrapper.workingCount > 0) {
+                          // Pill de agentes: com CLI trabalhando ou esperando,
+                          // o notch fechado mostra isso em vez da musica.
+                          // Lados espelhados em largura pra alinhar o vao
+                          // preto com o notch fisico.
+                          HStack(spacing: 0) {
+                              HStack(spacing: 5) {
+                                  Circle()
+                                      .fill(agentWrapper.waitingCount > 0 ? Color.orange : Color.blue)
+                                      .frame(width: 5, height: 5)
+                                  Text(agentWrapper.waitingCount > 0
+                                       ? "\(agentWrapper.waitingCount) esperando"
+                                       : "trabalhando…")
+                                      .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                      .foregroundColor(.white.opacity(0.85))
+                                      .lineLimit(1)
+                              }
+                              .frame(width: 110, alignment: .leading)
+
+                              Rectangle()
+                                  .fill(.black)
+                                  .frame(width: vm.closedNotchSize.width + 10)
+
+                              Text("\(agentWrapper.sessions.count)")
+                                  .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                  .foregroundColor(.white.opacity(0.6))
+                                  .frame(width: 110, alignment: .trailing)
+                          }
+                          .frame(height: vm.effectiveClosedNotchHeight, alignment: .center)
+                          .transition(.blurReplace)
                       } else if (!coordinator.expandingView.show || coordinator.expandingView.type == .music) && vm.notchState == .closed && (musicManager.isPlaying || !musicManager.isPlayerIdle) && coordinator.musicLiveActivityEnabled && !vm.hideOnClosed {
                           MusicLiveActivity()
                               .frame(alignment: .center)
@@ -363,6 +432,11 @@ struct ContentView: View {
                   view
                       .fixedSize()
               }
+              // Expansao/recolhimento suave da pill de agentes; escopado
+              // por valor pra nao mexer nas animacoes de musica/bateria.
+              .animation(.smooth(duration: 0.3), value: agentWrapper.doneBanner)
+              .animation(.smooth(duration: 0.3), value: agentWrapper.workingCount)
+              .animation(.smooth(duration: 0.3), value: agentWrapper.waitingCount)
               .zIndex(2)
             if vm.notchState == .open {
                 VStack {
@@ -727,6 +801,11 @@ class AIAgentWrapper: ObservableObject {
     /// como sinal de "pode fechar".
     @Published var collapseTick: Int = 0
 
+    /// Banner curto de "terminou" no notch fechado: expande um pouco e
+    /// mostra o titulo, sem abrir a ilha inteira. O close do hook (5s)
+    /// limpa. Vazio = sem banner.
+    @Published var doneBanner: String = ""
+
     /// Utilizacao (0-100) por provedor ("claude", "codex", ...), vinda do
     /// hook junto com os eventos. Cada provedor com fonte de quota ganha
     /// sua propria capsula no header.
@@ -741,6 +820,10 @@ class AIAgentWrapper: ObservableObject {
 
     var waitingCount: Int {
         sessions.filter { $0.isWaiting }.count
+    }
+
+    var workingCount: Int {
+        sessions.filter { $0.state == .working }.count
     }
 
     private var listener: NWListener?
@@ -888,6 +971,14 @@ class AIAgentWrapper: ObservableObject {
                                 self?.focusedSessionID = sessionID
                             }
 
+                            // Fim de ciclo vira banner curto no notch
+                            // fechado (o close de 5s do hook limpa).
+                            let estadoWire = AISessionState.from(wire: dict["state"] as? String)
+                            if estadoWire == .idle {
+                                let titulo = dict["title"] as? String ?? ""
+                                self?.doneBanner = titulo.isEmpty ? displayName : titulo
+                            }
+
                             guard self?.isRequestingPermission != true else { return }
                             self?.activeConnection = connection
                             self?.sourceName = displayName
@@ -911,6 +1002,7 @@ class AIAgentWrapper: ObservableObject {
                         }
                     } else if type == "close" {
                         DispatchQueue.main.async {
+                            self?.doneBanner = ""
                             self?.pendingConnections.removeValue(forKey: sessionID)
 
                             // A sessao NAO sai da lista: e clicando nela que
