@@ -945,7 +945,8 @@ class AIAgentWrapper: ObservableObject {
                                 project: project, state: .waiting, message: promptText,
                                 rule: dict["rule"] as? String ?? "",
                                 tty: dict["tty"] as? String ?? "",
-                                term: dict["term"] as? String ?? ""
+                                term: dict["term"] as? String ?? "",
+                                diff: dict["diff"] as? [String] ?? []
                             )
                             // Quem pede aprovacao rouba o foco: e o unico que trava o CLI.
                             self?.focusedSessionID = sessionID
@@ -1039,7 +1040,7 @@ class AIAgentWrapper: ObservableObject {
         id: String, source: String, name: String,
         project: String, state: AISessionState, message: String,
         rule: String = "", title: String = "",
-        tty: String = "", term: String = ""
+        tty: String = "", term: String = "", diff: [String] = []
     ) {
         if let i = sessions.firstIndex(where: { $0.id == id }) {
             sessions[i].source = source
@@ -1047,6 +1048,7 @@ class AIAgentWrapper: ObservableObject {
             sessions[i].state = state
             sessions[i].message = message
             sessions[i].rule = rule
+            sessions[i].diff = diff
             sessions[i].updatedAt = Date()
             if !project.isEmpty { sessions[i].project = project }
             // Pedido de permissao nao carrega titulo: nao apaga o que ja tem.
@@ -1063,7 +1065,7 @@ class AIAgentWrapper: ObservableObject {
             sessions.append(AISession(
                 id: id, source: source, name: name, project: project,
                 title: title, tty: tty, term: term,
-                state: state, message: message, rule: rule
+                state: state, message: message, rule: rule, diff: diff
             ))
         }
     }
@@ -1281,6 +1283,8 @@ struct AISession: Identifiable {
     /// Regra que o botao "Sempre" gravaria (ex: "Bash(git status:*)").
     /// Vazia = o hook nao conseguiu estreitar o suficiente, esconde o botao.
     var rule: String = ""
+    /// Linhas de diff do pedido (prefixo "-"/"+"); so Edit/Write tem.
+    var diff: [String] = []
     var updatedAt: Date = Date()
 
     var isWaiting: Bool { state == .waiting }
@@ -1457,16 +1461,48 @@ struct AISessionListView: View {
                         }
                     }
 
-                    Text(focused.message)
-                        .font(.system(size: 10.5, weight: .regular, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(focused.isWaiting ? 3 : 5)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if focused.isWaiting && !focused.diff.isEmpty {
+                        // Pedido de Edit/Write: mostra o diff de verdade,
+                        // nao so o caminho do arquivo.
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(focused.message)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.6))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .padding(.bottom, 2)
+                            ForEach(Array(focused.diff.enumerated()), id: \.offset) { _, linha in
+                                Text(linha)
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundColor(linha.hasPrefix("+") ? Color.green.opacity(0.95)
+                                                     : linha.hasPrefix("-") ? Color.red.opacity(0.9)
+                                                     : .white.opacity(0.8))
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 4)
+                                    .background(
+                                        (linha.hasPrefix("+") ? Color.green.opacity(0.12)
+                                         : linha.hasPrefix("-") ? Color.red.opacity(0.12)
+                                         : Color.clear)
+                                    )
+                            }
+                        }
+                        .padding(6)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
                         .background(Color.white.opacity(0.06))
                         .cornerRadius(6)
+                    } else {
+                        Text(focused.message)
+                            .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.85))
+                            .lineLimit(focused.isWaiting ? 3 : 5)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(Color.white.opacity(0.06))
+                            .cornerRadius(6)
+                    }
 
                     Spacer(minLength: 0)
 

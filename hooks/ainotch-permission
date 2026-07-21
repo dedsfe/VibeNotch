@@ -67,6 +67,38 @@ def resumo(payload):
     return f"{tool}: {detalhe}" if detalhe else tool
 
 
+def diff(payload):
+    """Linhas de diff pro card da ilha, ou [] quando nao ha o que mostrar.
+
+    So Edit/Write tem antes-e-depois no proprio payload; o resto ja se
+    explica pelo resumo. Cap curto: o card tem ~5 linhas de altura."""
+    tool = payload.get("tool_name", "")
+    entrada = payload.get("tool_input") or {}
+    LARGURA, POR_LADO = 60, 3
+
+    def apara(linhas, prefixo):
+        uteis = [l.rstrip() for l in linhas if l.strip()]
+        corte = uteis[:POR_LADO]
+        saida = [
+            prefixo + (l[:LARGURA - 1] + "…" if len(l) > LARGURA else l)
+            for l in corte
+        ]
+        if len(uteis) > POR_LADO:
+            saida.append(f"{prefixo}… +{len(uteis) - POR_LADO} linhas")
+        return saida
+
+    if tool == "Edit":
+        velho = str(entrada.get("old_string", "")).splitlines()
+        novo = str(entrada.get("new_string", "")).splitlines()
+        return apara(velho, "-") + apara(novo, "+")
+
+    if tool == "Write":
+        conteudo = str(entrada.get("content", "")).splitlines()
+        return apara(conteudo, "+")
+
+    return []
+
+
 def regra(payload):
     """Regra de permissao pro botao "Sempre", ou "" se nao der pra gerar
     uma que seja estreita o suficiente pra ser segura.
@@ -160,7 +192,7 @@ def descobrir_tty():
     return ""
 
 
-def perguntar(texto, permissao):
+def perguntar(texto, permissao, linhas_diff):
     """Devolve "allow", "always", "deny" ou None (app fora do ar)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(CONNECT_TIMEOUT)
@@ -174,6 +206,7 @@ def perguntar(texto, permissao):
             "type": "prompt",
             "message": texto,
             "rule": permissao,
+            "diff": linhas_diff,
             "tty": descobrir_tty(),
             "term": os.environ.get("TERM_PROGRAM", ""),
         }).encode())
@@ -203,7 +236,7 @@ def main():
         return
 
     permissao = regra(payload)
-    decisao = perguntar(resumo(payload), permissao)
+    decisao = perguntar(resumo(payload), permissao, diff(payload))
     if decisao is None:
         return  # sem saida = Claude Code pergunta do jeito dele
 

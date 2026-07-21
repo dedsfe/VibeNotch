@@ -4,7 +4,7 @@ Empilhado a partir dos prints/vídeos (site vibeisland.app + demo do Edward Luo)
 Sem ordem de prioridade — é inventário.
 
 1. ~~**Medidor de uso/rate-limit** no topo~~ ✅ feito — cápsula "claude 5h · 7d" no header (Keychain + endpoint oauth/usage, cache 60s); por provedor quando Codex/Gemini tiverem fonte de quota
-2. **Diff real no pedido de permissão** — arquivo, +2 -2, linhas vermelho/verde
+2. ~~**Diff real no pedido de permissão**~~ ✅ feito — Edit mostra -velho/+novo, Write mostra preview; cap de 3 linhas por lado + "+N linhas"
 3. **Botão Bypass** — terceira opção além de Allow/Deny
 4. **Atalhos de teclado** — ⌘Y/⌘N pra allow/deny, ⌘1/2/3 pra escolhas
 5. **AskUserQuestion na ilha** — opções numeradas com título + descrição (hoje ignoramos)
