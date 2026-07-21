@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Ponte entre o Claude Code e o AINotch (Vibe Island caseiro).
+
+Recebe o payload do hook no stdin, manda o pedido de permissao pro app
+na porta 8123 e espera o clique em Allow/Deny na ilha.
+
+Se o app nao estiver rodando, sai calado -> o Claude Code mostra o
+prompt normal no terminal. Nunca bloqueia por conta propria.
+"""
+import json
+import socket
+import sys
+
+HOST = "127.0.0.1"
+PORT = 8123
+CONNECT_TIMEOUT = 0.5   # app no ar ou nao: decide rapido
+ANSWER_TIMEOUT = 3600   # tempo pro Andre clicar
+
+# Estas nao sao permissao sim/nao: pedem uma escolha ou um texto.
+# Allow/Deny na ilha nao responderia nada e a pergunta ficaria travada
+# no terminal -- entao deixa passar direto pro Claude Code.
+TOOLS_IGNORADAS = {"AskUserQuestion", "ExitPlanMode"}
+
+
+def resumo(payload):
+    """Monta uma linha curta que cabe na ilha."""
+    tool = payload.get("tool_name", "?")
+    entrada = payload.get("tool_input") or {}
+
+    if tool == "Bash":
+        detalhe = entrada.get("command", "")
+    elif tool in ("Write", "Edit", "Read", "NotebookEdit"):
+        detalhe = entrada.get("file_path", "")
+    elif tool == "WebFetch":
+        detalhe = entrada.get("url", "")
+    else:
+        detalhe = json.dumps(entrada, ensure_ascii=False)
+
+    detalhe = " ".join(str(detalhe).split())
+    if len(detalhe) > 160:
+        detalhe = detalhe[:157] + "..."
+
+    return f"{tool}: {detalhe}" if detalhe else tool
+
+
+def perguntar(texto):
+    """Devolve True (allow), False (deny) ou None (app fora do ar)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(CONNECT_TIMEOUT)
+    try:
+        s.connect((HOST, PORT))
+    except OSError:
+        return None
+
+    try:
+        s.sendall(json.dumps({"type": "prompt", "message": texto}).encode())
+        s.settimeout(ANSWER_TIMEOUT)
+        resposta = s.recv(1024).decode().strip().lower()
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+    if resposta.startswith("y"):
+        return True
+    if resposta.startswith("n"):
+        return False
+    return None
+
+
+def main():
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+
+    if payload.get("tool_name") in TOOLS_IGNORADAS:
+        return
+
+    decisao = perguntar(resumo(payload))
+    if decisao is None:
+        return  # sem saida = Claude Code pergunta do jeito dele
+
+    # PermissionRequest tem schema proprio: decision.behavior, e nao o
+    # permissionDecision do PreToolUse. Com o campo errado o Claude Code
+    # ignora a resposta em silencio e o clique na ilha nao faz nada.
+    json.dump({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "allow" if decisao else "deny"},
+        }
+    }, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()

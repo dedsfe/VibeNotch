@@ -12,10 +12,12 @@ import Defaults
 import KeyboardShortcuts
 import SwiftUI
 import SwiftUIIntrospect
+import Network
 
 @MainActor
 struct ContentView: View {
     @EnvironmentObject var vm: BoringViewModel
+    @EnvironmentObject var agentWrapper: AIAgentWrapper
     @ObservedObject var webcamManager = WebcamManager.shared
 
     @ObservedObject var coordinator = BoringViewCoordinator.shared
@@ -240,6 +242,21 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: agentWrapper.sessions.count) { _, count in
+            if count > 0 {
+                coordinator.currentView = .terminal
+                vm.open()
+            } else {
+                vm.close()
+            }
+        }
+        .onChange(of: agentWrapper.waitingCount) { _, waiting in
+            // Um novo pedido de aprovacao reabre a ilha mesmo se ela ja estava aberta.
+            if waiting > 0 {
+                coordinator.currentView = .terminal
+                vm.open()
+            }
+        }
     }
 
     @ViewBuilder
@@ -349,6 +366,24 @@ struct ContentView: View {
                         NotchHomeView(albumArtNamespace: albumArtNamespace)
                     case .shelf:
                         ShelfView()
+                    case .terminal:
+                        if !agentWrapper.sessions.isEmpty {
+                            AISessionListView(agentWrapper: agentWrapper)
+                        } else {
+                            VStack(spacing: 8) {
+                                Image(systemName: "terminal")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.gray.opacity(0.5))
+                                Text("No active CLI requests")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.gray)
+                                Text("Background agents are sleeping.")
+                                    .font(.system(size: 11, weight: .regular))
+                                    .foregroundColor(.gray.opacity(0.5))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 24)
+                        }
                     }
                 }
                 .transition(
@@ -549,6 +584,9 @@ struct ContentView: View {
                         self.isHovering = false
                     }
                     
+                    // Enquanto algum CLI espera clique, a ilha nao foge do mouse.
+                    if self.agentWrapper.waitingCount > 0 { return }
+
                     if self.vm.notchState == .open && !self.vm.isBatteryPopoverActive && !SharingStateManager.shared.preventNotchClose {
                         self.vm.close()
                     }
@@ -657,4 +695,490 @@ struct GeneralDropTargetDelegate: DropDelegate {
     return ContentView()
         .environmentObject(vm)
         .frame(width: vm.notchSize.width, height: vm.notchSize.height)
+}
+import Foundation
+import Combine
+
+class AIAgentWrapper: ObservableObject {
+    @Published var isRequestingPermission: Bool = false
+    @Published var permissionPrompt: String = ""
+
+    @Published var isShowingMessage: Bool = false
+    @Published var sourceName: String = "Claude Code"
+
+    private static let sourceNames: [String: String] = [
+        "claude": "Claude Code",
+        "gemini": "Gemini",
+        "antigravity": "Antigravity",
+        "codex": "Codex",
+    ]
+
+    /// Uma sessao por CLI aberto. A ilha mostra essa lista.
+    @Published var sessions: [AISession] = []
+    /// Qual sessao esta em foco no painel (a que mostra mensagem e botoes).
+    @Published var focusedSessionID: String?
+
+    var focusedSession: AISession? {
+        sessions.first { $0.id == focusedSessionID }
+    }
+
+    var waitingCount: Int {
+        sessions.filter { $0.isWaiting }.count
+    }
+
+    private var listener: NWListener?
+    private var activeConnection: NWConnection?
+    /// Socket de quem esta esperando resposta, por sessao. Sem isso, dois CLIs
+    /// pedindo permissao ao mesmo tempo fariam o clique ir pro socket errado.
+    private var pendingConnections: [String: NWConnection] = [:]
+
+    func focus(on sessionID: String) {
+        focusedSessionID = sessionID
+    }
+
+    func startAgent() {
+        do {
+            let port = NWEndpoint.Port(rawValue: 8123)!
+            listener = try NWListener(using: .tcp, on: port)
+            
+            listener?.newConnectionHandler = { [weak self] connection in
+                self?.handleConnection(connection)
+            }
+            
+            listener?.start(queue: .main)
+            print("AI Notch Server listening on port 8123")
+        } catch {
+            print("Failed to start server: \(error)")
+        }
+    }
+    
+    private func handleConnection(_ connection: NWConnection) {
+        connection.start(queue: .main)
+        receiveNextMessage(on: connection)
+    }
+    
+    private func receiveNextMessage(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, context, isComplete, error in
+            if let data = data, let message = String(data: data, encoding: .utf8) {
+                print("Received from CLI wrapper: \(message)")
+                
+                // Using JSON for the protocol
+                // Ex: {"type":"prompt","message":"Do you want to allow this command?"}
+                if let jsonData = message.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any],
+                   let type = dict["type"] as? String {
+
+                    let rawSource = dict["source"] as? String ?? "claude"
+                    let displayName = Self.sourceNames[rawSource] ?? rawSource.capitalized
+                    // Sem session id, cada CLI vira uma linha so (por origem).
+                    let sessionID = (dict["session"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                        ?? "anon-\(rawSource)"
+                    let project = dict["project"] as? String ?? ""
+
+                    if type == "prompt", let promptText = dict["message"] as? String {
+                        DispatchQueue.main.async {
+                            self?.pendingConnections[sessionID] = connection
+                            self?.upsert(
+                                id: sessionID, source: rawSource, name: displayName,
+                                project: project, state: .waiting, message: promptText
+                            )
+                            // Quem pede aprovacao rouba o foco: e o unico que trava o CLI.
+                            self?.focusedSessionID = sessionID
+
+                            self?.activeConnection = connection
+                            self?.sourceName = displayName
+                            self?.permissionPrompt = promptText
+                            self?.isShowingMessage = false
+                            self?.isRequestingPermission = true
+                        }
+                    } else if type == "message", let msgText = dict["message"] as? String {
+                        let state = AISessionState.from(wire: dict["state"] as? String)
+                        DispatchQueue.main.async {
+                            self?.upsert(
+                                id: sessionID, source: rawSource, name: displayName,
+                                project: project, state: state, message: msgText
+                            )
+                            // Aviso passivo nao rouba o foco de quem esta travado esperando.
+                            if self?.focusedSession?.isWaiting != true {
+                                self?.focusedSessionID = sessionID
+                            }
+
+                            guard self?.isRequestingPermission != true else { return }
+                            self?.activeConnection = connection
+                            self?.sourceName = displayName
+                            self?.permissionPrompt = msgText
+                            self?.isShowingMessage = true
+                        }
+                    } else if type == "close" {
+                        DispatchQueue.main.async {
+                            self?.sessions.removeAll { $0.id == sessionID }
+                            self?.pendingConnections.removeValue(forKey: sessionID)
+                            if self?.focusedSessionID == sessionID {
+                                self?.focusedSessionID = self?.sessions.first?.id
+                            }
+
+                            // So fecha a ilha se ninguem mais precisa dela.
+                            if self?.sessions.contains(where: { $0.isWaiting }) != true {
+                                self?.activeConnection = nil
+                                self?.isRequestingPermission = false
+                                self?.isShowingMessage = self?.sessions.isEmpty == false
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if isComplete || error != nil {
+                // Connection closed or error
+            } else {
+                self?.receiveNextMessage(on: connection)
+            }
+        }
+    }
+    
+    /// Cria ou atualiza a linha daquela sessao na lista.
+    private func upsert(
+        id: String, source: String, name: String,
+        project: String, state: AISessionState, message: String
+    ) {
+        if let i = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[i].source = source
+            sessions[i].name = name
+            sessions[i].state = state
+            sessions[i].message = message
+            sessions[i].updatedAt = Date()
+            if !project.isEmpty { sessions[i].project = project }
+        } else {
+            sessions.append(AISession(
+                id: id, source: source, name: name,
+                project: project, state: state, message: message
+            ))
+        }
+    }
+
+    func approve(sessionID: String) {
+        respond("y\n", to: sessionID)
+    }
+
+    func deny(sessionID: String) {
+        respond("n\n", to: sessionID)
+    }
+
+    // Compatibilidade: sem id, responde quem esta em foco.
+    func approve() {
+        guard let id = focusedSessionID else { return }
+        approve(sessionID: id)
+    }
+
+    func deny() {
+        guard let id = focusedSessionID else { return }
+        deny(sessionID: id)
+    }
+
+    /// Responde o CLI daquela sessao — e so daquela.
+    private func respond(_ response: String, to sessionID: String) {
+        if let i = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[i].state = .working
+            sessions[i].message = ""
+        }
+
+        // Se ainda tem outro CLI travado, a ilha continua nele.
+        if let next = sessions.first(where: { $0.isWaiting }) {
+            focusedSessionID = next.id
+            permissionPrompt = next.message
+            sourceName = next.name
+            isRequestingPermission = true
+        } else {
+            isRequestingPermission = false
+            permissionPrompt = ""
+        }
+
+        guard let connection = pendingConnections.removeValue(forKey: sessionID) else { return }
+        let data = response.data(using: .utf8)!
+        connection.send(content: data, completion: .contentProcessed({ error in
+            if let error = error {
+                print("Failed to send response: \(error)")
+            }
+            // Close the connection after responding to the wrapper
+            connection.cancel()
+        }))
+        if connection === activeConnection { activeConnection = nil }
+    }
+}
+import SwiftUI
+
+struct AITerminalView: View {
+    @ObservedObject var agentWrapper: AIAgentWrapper
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            // Header
+            HStack {
+                Circle()
+                    .fill(agentWrapper.isRequestingPermission ? Color.orange : Color.blue)
+                    .frame(width: 8, height: 8)
+                Text(agentWrapper.isRequestingPermission ? "Permission Request" : "Message")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            
+            // Tool and Context
+            HStack {
+                Text(agentWrapper.isRequestingPermission ? "⚠️" : "💬")
+                Text(agentWrapper.sourceName)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            
+            // The Prompt itself
+            Text(agentWrapper.permissionPrompt.isEmpty ? "..." : agentWrapper.permissionPrompt)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .foregroundColor(Color.white.opacity(0.8))
+                .lineLimit(4)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(8)
+                .padding(.horizontal, 16)
+            
+            // Buttons
+            if agentWrapper.isRequestingPermission {
+                HStack(spacing: 12) {
+                    Button(action: {
+                        agentWrapper.deny()
+                    }) {
+                        Text("Deny")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.1))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    Button(action: {
+                        agentWrapper.approve()
+                    }) {
+                        Text("Allow")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.white)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+            } else {
+                Spacer().frame(height: 16)
+            }
+        }
+        .frame(width: 320)
+        .background(Color.black)
+    }
+}
+import SwiftUI
+
+/// Estado de uma sessao de CLI vista pela ilha.
+enum AISessionState: String {
+    case working
+    case waiting   // pediu permissao e esta parado esperando o clique
+    case idle
+    case error
+    case offline
+
+    /// Nomes que os hooks mandam em "state" (ver ~/AINotch/hooks/ainotch-notify).
+    static func from(wire: String?) -> AISessionState {
+        switch wire {
+        case "pedido": return .waiting
+        case "erro": return .error
+        case "offline": return .offline
+        case "working": return .working
+        default: return .idle
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .working: return .blue
+        case .waiting: return .orange
+        case .idle: return .green
+        case .error: return .red
+        case .offline: return .gray
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working: return "trabalhando"
+        case .waiting: return "quer aprovação"
+        case .idle: return "livre"
+        case .error: return "erro"
+        case .offline: return "encerrada"
+        }
+    }
+}
+
+/// Uma sessao de CLI (um Claude, um Codex, um Gemini...) rastreada pela ilha.
+struct AISession: Identifiable {
+    let id: String
+    var source: String       // claude / codex / gemini / antigravity
+    var name: String         // nome bonito pra tela
+    var project: String      // pasta onde ele esta rodando
+    var state: AISessionState
+    var message: String
+    var updatedAt: Date = Date()
+
+    var isWaiting: Bool { state == .waiting }
+}
+
+/// Linha da lista: bolinha de estado + quem e + onde esta.
+struct AISessionRow: View {
+    let session: AISession
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(session.state.color)
+                .frame(width: 6, height: 6)
+
+            Text(session.name)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white)
+                .fixedSize()
+
+            if !session.project.isEmpty {
+                Text(session.project)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.4))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 4)
+
+            Text(session.state.label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(session.state.color.opacity(0.95))
+                .fixedSize()
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.white.opacity(isSelected ? 0.12 : 0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(
+                    session.isWaiting ? session.state.color.opacity(0.45) : .clear,
+                    lineWidth: 1
+                )
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+/// Painel principal: lista todas as sessoes e, quando alguma pede permissao,
+/// mostra o pedido dela com Allow/Deny.
+struct AISessionListView: View {
+    @ObservedObject var agentWrapper: AIAgentWrapper
+
+    /// A ilha tem 190px fixos: a lista rola, o pedido em foco fica sempre visivel.
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text("Agentes")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.9))
+                    Spacer(minLength: 4)
+                    if agentWrapper.waitingCount > 0 {
+                        Text("\(agentWrapper.waitingCount) esperando")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.orange)
+                            .fixedSize()
+                    }
+                }
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 3) {
+                        ForEach(agentWrapper.sessions) { session in
+                            AISessionRow(
+                                session: session,
+                                isSelected: session.id == agentWrapper.focusedSession?.id
+                            )
+                            .onTapGesture { agentWrapper.focus(on: session.id) }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let focused = agentWrapper.focusedSession, focused.isWaiting {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Text("⚠️").font(.system(size: 10))
+                        Text(focused.name)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                        Spacer(minLength: 0)
+                    }
+
+                    Text(focused.message)
+                        .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(6)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 8) {
+                        Button(action: { agentWrapper.deny(sessionID: focused.id) }) {
+                            Text("Deny")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.12))
+                                .cornerRadius(7)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                        Button(action: { agentWrapper.approve(sessionID: focused.id) }) {
+                            Text("Allow")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(Color.white)
+                                .cornerRadius(7)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .frame(width: 250)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
 }

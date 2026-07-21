@@ -53,3 +53,7 @@ build/
 *.xcarchive
 *.dSYM
 
+
+# Python bytecode dos hooks
+__pycache__/
+*.pyc

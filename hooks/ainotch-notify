@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Avisa a ilha que um CLI mudou de estado (fim de ciclo, pedido, etc).
+
+Fala tres dialetos:
+  - Claude Code / Gemini / Antigravity: payload JSON no stdin
+  - Codex: payload JSON no argv[1] (mecanismo `notify` do config.toml)
+
+Nao bloqueia: manda a mensagem, espera uns segundos pra dar tempo de
+ler e fecha a ilha. Quem e (source) vem da env AINOTCH_SOURCE.
+"""
+import json
+import os
+import socket
+import sys
+import time
+
+HOST = "127.0.0.1"
+PORT = 8123
+CONNECT_TIMEOUT = 0.5
+TEMPO_NA_TELA = 5  # segundos antes de fechar sozinho
+
+NOMES = {
+    "claude": "Claude Code",
+    "gemini": "Gemini",
+    "antigravity": "Antigravity",
+    "codex": "Codex",
+}
+
+# evento -> (state, verbo). Cobre Claude, Gemini/Antigravity e Codex.
+ESTADOS = {
+    # Claude Code
+    "Stop": ("idle", "terminou"),
+    "StopFailure": ("erro", "parou com erro"),
+    "SubagentStop": ("idle", "subagente terminou"),
+    # Gemini / Antigravity
+    "AfterAgent": ("idle", "terminou"),
+    "Notification": ("pedido", "precisa de você"),
+    # ambos
+    "SessionEnd": ("offline", "sessão encerrada"),
+    # Codex (campo "type" do notify)
+    "agent-turn-complete": ("idle", "terminou"),
+}
+
+
+def enviar(payload):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(CONNECT_TIMEOUT)
+    try:
+        s.connect((HOST, PORT))
+        s.sendall(json.dumps(payload).encode())
+    except OSError:
+        return False
+    finally:
+        s.close()
+    return True
+
+
+def ler_payload():
+    """Codex manda por argv, o resto por stdin."""
+    bruto = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
+    try:
+        dados = json.loads(bruto or "{}")
+        return dados if isinstance(dados, dict) else {}
+    except ValueError:
+        return {}
+
+
+def main():
+    entrada = ler_payload()
+
+    evento = entrada.get("hook_event_name") or entrada.get("type") or "Stop"
+    estado, verbo = ESTADOS.get(evento, ("idle", "terminou"))
+
+    fonte = os.environ.get("AINOTCH_SOURCE", "claude")
+    nome = NOMES.get(fonte, fonte)
+    projeto = os.path.basename(entrada.get("cwd") or os.getcwd())
+
+    # Notification do Gemini costuma trazer o texto do aviso junto.
+    extra = entrada.get("message") or entrada.get("last-assistant-message") or ""
+    extra = " ".join(str(extra).split())
+    if len(extra) > 120:
+        extra = extra[:117] + "..."
+
+    linha = f"{nome} {verbo} — {projeto}"
+    if extra:
+        linha += f"\n{extra}"
+
+    ok = enviar({
+        "type": "message",
+        "message": linha,
+        "source": fonte,
+        "state": estado,
+        "session": entrada.get("session_id", ""),
+    })
+    if not ok:
+        return  # app fechado, nada a fazer
+
+    time.sleep(TEMPO_NA_TELA)
+    enviar({"type": "close"})
+
+
+if __name__ == "__main__":
+    main()

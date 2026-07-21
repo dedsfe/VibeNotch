@@ -55,6 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var viewModels: [String: BoringViewModel] = [:] // UUID -> BoringViewModel
     var window: NSWindow?
     let vm: BoringViewModel = .init()
+    var agentWrapper = AIAgentWrapper()
     @ObservedObject var coordinator = BoringViewCoordinator.shared
     var quickShareService = QuickShareService.shared
     var whatsNewWindow: NSWindow?
@@ -247,6 +248,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = NSHostingView(
             rootView: ContentView()
                 .environmentObject(viewModel)
+                .environmentObject(agentWrapper)
         )
 
         window.orderFrontRegardless()
@@ -280,7 +282,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-
+        agentWrapper.startAgent()
+        
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenConfigurationDidChange),

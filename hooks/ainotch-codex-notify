@@ -1,0 +1,7 @@
+#!/bin/sh
+# Adaptador do `notify` do Codex (config.toml so aceita argv, sem env).
+# 1) preserva o SkyComputerUseClient que ja estava configurado
+# 2) repassa o JSON pro ainotch-notify como source=codex
+SKY="$HOME/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+[ -x "$SKY" ] && "$SKY" turn-ended "$1" >/dev/null 2>&1 &
+AINOTCH_SOURCE=codex exec "$HOME/AINotch/hooks/ainotch-notify" "$1"
