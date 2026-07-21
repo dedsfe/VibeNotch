@@ -250,6 +250,11 @@ struct ContentView: View {
                 vm.close()
             }
         }
+        .onChange(of: agentWrapper.collapseTick) { _, _ in
+            // As sessoes terminadas continuam na lista, entao quem manda
+            // recolher e o CLI avisando que acabou.
+            if agentWrapper.waitingCount == 0 { vm.close() }
+        }
         .onChange(of: agentWrapper.waitingCount) { _, waiting in
             // Um novo pedido de aprovacao reabre a ilha mesmo se ela ja estava aberta.
             if waiting > 0 {
@@ -717,6 +722,13 @@ class AIAgentWrapper: ObservableObject {
     @Published var sessions: [AISession] = []
     /// Qual sessao esta em foco no painel (a que mostra mensagem e botoes).
     @Published var focusedSessionID: String?
+    /// Sobe quando um CLI pede pra recolher a ilha. As sessoes ficam na
+    /// lista depois de terminarem, entao sessions.count nao serve mais
+    /// como sinal de "pode fechar".
+    @Published var collapseTick: Int = 0
+
+    /// Quantas conversas terminadas ficam guardadas pra voltar nelas.
+    private let limiteDeSessoes = 5
 
     var focusedSession: AISession? {
         sessions.first { $0.id == focusedSessionID }
@@ -734,6 +746,58 @@ class AIAgentWrapper: ObservableObject {
 
     func focus(on sessionID: String) {
         focusedSessionID = sessionID
+    }
+
+    /// Traz pra frente a aba do terminal onde essa sessao esta rodando.
+    /// Casa pelo tty, que e o unico id estavel: titulo de aba muda sozinho.
+    func jumpToTerminal(sessionID: String) {
+        guard let sessao = sessions.first(where: { $0.id == sessionID }),
+              !sessao.tty.isEmpty else { return }
+
+        let alvo = sessao.term == "iTerm.app" ? "iTerm" : "Terminal"
+        let script: String
+
+        if alvo == "iTerm" {
+            script = """
+            tell application "iTerm"
+                repeat with j in windows
+                    repeat with a in tabs of j
+                        repeat with s in sessions of a
+                            if tty of s is "\(sessao.tty)" then
+                                select j
+                                select a
+                                select s
+                                activate
+                                return
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            """
+        } else {
+            script = """
+            tell application "Terminal"
+                repeat with j in windows
+                    repeat with a in tabs of j
+                        if tty of a is "\(sessao.tty)" then
+                            set selected of a to true
+                            set frontmost of j to true
+                            activate
+                            return
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            """
+        }
+
+        // AppleScript pode travar alguns segundos esperando o app responder.
+        DispatchQueue.global(qos: .userInitiated).async {
+            var erro: NSDictionary?
+            NSAppleScript(source: script)?.executeAndReturnError(&erro)
+            if let erro { print("Pulo pro terminal falhou: \(erro)") }
+        }
     }
 
     func startAgent() {
@@ -781,7 +845,9 @@ class AIAgentWrapper: ObservableObject {
                             self?.upsert(
                                 id: sessionID, source: rawSource, name: displayName,
                                 project: project, state: .waiting, message: promptText,
-                                rule: dict["rule"] as? String ?? ""
+                                rule: dict["rule"] as? String ?? "",
+                                tty: dict["tty"] as? String ?? "",
+                                term: dict["term"] as? String ?? ""
                             )
                             // Quem pede aprovacao rouba o foco: e o unico que trava o CLI.
                             self?.focusedSessionID = sessionID
@@ -797,7 +863,10 @@ class AIAgentWrapper: ObservableObject {
                         DispatchQueue.main.async {
                             self?.upsert(
                                 id: sessionID, source: rawSource, name: displayName,
-                                project: project, state: state, message: msgText
+                                project: project, state: state, message: msgText,
+                                title: dict["title"] as? String ?? "",
+                                tty: dict["tty"] as? String ?? "",
+                                term: dict["term"] as? String ?? ""
                             )
                             // Aviso passivo nao rouba o foco de quem esta travado esperando.
                             if self?.focusedSession?.isWaiting != true {
@@ -812,17 +881,23 @@ class AIAgentWrapper: ObservableObject {
                         }
                     } else if type == "close" {
                         DispatchQueue.main.async {
-                            self?.sessions.removeAll { $0.id == sessionID }
                             self?.pendingConnections.removeValue(forKey: sessionID)
-                            if self?.focusedSessionID == sessionID {
-                                self?.focusedSessionID = self?.sessions.first?.id
-                            }
 
-                            // So fecha a ilha se ninguem mais precisa dela.
+                            // A sessao NAO sai da lista: e clicando nela que
+                            // se volta pro terminal daquela conversa. So perde
+                            // o destaque de quem estava esperando resposta.
+                            if let i = self?.sessions.firstIndex(where: { $0.id == sessionID }),
+                               self?.sessions[i].isWaiting == true {
+                                self?.sessions[i].state = .idle
+                            }
+                            self?.podarSessoes()
+
+                            // So recolhe a ilha se ninguem mais precisa dela.
                             if self?.sessions.contains(where: { $0.isWaiting }) != true {
                                 self?.activeConnection = nil
                                 self?.isRequestingPermission = false
-                                self?.isShowingMessage = self?.sessions.isEmpty == false
+                                self?.isShowingMessage = false
+                                self?.collapseTick += 1
                             }
                         }
                     }
@@ -841,7 +916,8 @@ class AIAgentWrapper: ObservableObject {
     private func upsert(
         id: String, source: String, name: String,
         project: String, state: AISessionState, message: String,
-        rule: String = ""
+        rule: String = "", title: String = "",
+        tty: String = "", term: String = ""
     ) {
         if let i = sessions.firstIndex(where: { $0.id == id }) {
             sessions[i].source = source
@@ -851,11 +927,32 @@ class AIAgentWrapper: ObservableObject {
             sessions[i].rule = rule
             sessions[i].updatedAt = Date()
             if !project.isEmpty { sessions[i].project = project }
+            // Pedido de permissao nao carrega titulo: nao apaga o que ja tem.
+            if !title.isEmpty { sessions[i].title = title }
+            if !tty.isEmpty { sessions[i].tty = tty }
+            if !term.isEmpty { sessions[i].term = term }
         } else {
             sessions.append(AISession(
-                id: id, source: source, name: name,
-                project: project, state: state, message: message, rule: rule
+                id: id, source: source, name: name, project: project,
+                title: title, tty: tty, term: term,
+                state: state, message: message, rule: rule
             ))
+        }
+    }
+
+    /// Guarda so as conversas mais recentes. Quem ainda espera resposta
+    /// nunca e podado: perder o pedido travaria o CLI pra sempre.
+    private func podarSessoes() {
+        guard sessions.count > limiteDeSessoes else { return }
+
+        let ordenadas = sessions.sorted { $0.updatedAt > $1.updatedAt }
+        let manter = Set(
+            ordenadas.prefix(limiteDeSessoes).map(\.id)
+        ).union(sessions.filter(\.isWaiting).map(\.id))
+
+        sessions.removeAll { !manter.contains($0.id) }
+        if let atual = focusedSessionID, !manter.contains(atual) {
+            focusedSessionID = sessions.first?.id
         }
     }
 
@@ -1044,6 +1141,13 @@ struct AISession: Identifiable {
     var source: String       // claude / codex / gemini / antigravity
     var name: String         // nome bonito pra tela
     var project: String      // pasta onde ele esta rodando
+    /// Assunto da conversa, vindo do CLI (o mesmo titulo da aba do
+    /// terminal). Sem ele a linha cai de volta pro nome da pasta.
+    var title: String = ""
+    /// Terminal onde o CLI roda (ex: "/dev/ttys000" + "Apple_Terminal"),
+    /// pra ilha conseguir trazer a aba certa pra frente.
+    var tty: String = ""
+    var term: String = ""
     var state: AISessionState
     var message: String
     /// Regra que o botao "Sempre" gravaria (ex: "Bash(git status:*)").
@@ -1070,12 +1174,15 @@ struct AISessionRow: View {
                 .foregroundColor(.white)
                 .fixedSize()
 
-            if !session.project.isEmpty {
-                Text(session.project)
+            // Assunto da conversa diz mais que a pasta; a pasta so entra
+            // quando o CLI ainda nao nomeou o papo.
+            let assunto = session.title.isEmpty ? session.project : session.title
+            if !assunto.isEmpty {
+                Text(assunto)
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.4))
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
             }
 
             Spacer(minLength: 4)
@@ -1131,27 +1238,39 @@ struct AISessionListView: View {
                                 session: session,
                                 isSelected: session.id == agentWrapper.focusedSession?.id
                             )
-                            .onTapGesture { agentWrapper.focus(on: session.id) }
+                            .onTapGesture {
+                                agentWrapper.focus(on: session.id)
+                                // Quem espera resposta se responde aqui mesmo;
+                                // pular pro terminal so atrapalharia. O resto
+                                // e "quero voltar pra essa conversa".
+                                if !session.isWaiting {
+                                    agentWrapper.jumpToTerminal(sessionID: session.id)
+                                }
+                            }
                         }
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let focused = agentWrapper.focusedSession, focused.isWaiting {
+            // Painel do lado: pedido esperando resposta ou o fecho de quem
+            // acabou. "Livre" sozinho nao diz nada -- a ultima frase diz.
+            if let focused = agentWrapper.focusedSession, !focused.message.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
-                        Text("⚠️").font(.system(size: 10))
-                        Text(focused.name)
+                        Text(focused.isWaiting ? "⚠️" : "✅").font(.system(size: 10))
+                        Text(focused.title.isEmpty ? focused.name : focused.title)
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                         Spacer(minLength: 0)
                     }
 
                     Text(focused.message)
                         .font(.system(size: 10.5, weight: .regular, design: .monospaced))
                         .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(3)
+                        .lineLimit(focused.isWaiting ? 3 : 5)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1161,54 +1280,57 @@ struct AISessionListView: View {
 
                     Spacer(minLength: 0)
 
-                    HStack(spacing: 6) {
-                        Button(action: { agentWrapper.deny(sessionID: focused.id) }) {
-                            Text("Deny")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 7)
-                                .background(Color.white.opacity(0.12))
-                                .cornerRadius(7)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        // So aparece quando o hook conseguiu gerar uma regra
-                        // estreita: sem isso, um clique liberaria demais.
-                        if !focused.rule.isEmpty {
-                            Button(action: { agentWrapper.alwaysAllow(sessionID: focused.id) }) {
-                                Text("Sempre")
+                    // Quem so terminou nao tem o que responder: sem botoes.
+                    if focused.isWaiting {
+                        HStack(spacing: 6) {
+                            Button(action: { agentWrapper.deny(sessionID: focused.id) }) {
+                                Text("Deny")
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .foregroundColor(.white)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 7)
-                                    .background(Color.orange.opacity(0.35))
+                                    .background(Color.white.opacity(0.12))
                                     .cornerRadius(7)
                             }
                             .buttonStyle(PlainButtonStyle())
-                            .help("Libera \(focused.rule) pra sempre em settings.local.json")
+
+                            // So aparece quando o hook conseguiu gerar uma regra
+                            // estreita: sem isso, um clique liberaria demais.
+                            if !focused.rule.isEmpty {
+                                Button(action: { agentWrapper.alwaysAllow(sessionID: focused.id) }) {
+                                    Text("Sempre")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 7)
+                                        .background(Color.orange.opacity(0.35))
+                                        .cornerRadius(7)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .help("Libera \(focused.rule) pra sempre em settings.local.json")
+                            }
+
+                            Button(action: { agentWrapper.approve(sessionID: focused.id) }) {
+                                Text("Allow")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundColor(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(Color.white)
+                                    .cornerRadius(7)
+                            }
+                            .buttonStyle(PlainButtonStyle())
                         }
 
-                        Button(action: { agentWrapper.approve(sessionID: focused.id) }) {
-                            Text("Allow")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundColor(.black)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 7)
-                                .background(Color.white)
-                                .cornerRadius(7)
+                        // Mostra exatamente o que o "Sempre" vai gravar.
+                        if !focused.rule.isEmpty {
+                            Text(focused.rule)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.orange.opacity(0.8))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-
-                    // Mostra exatamente o que o "Sempre" vai gravar.
-                    if !focused.rule.isEmpty {
-                        Text(focused.rule)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.orange.opacity(0.8))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .frame(width: 250)

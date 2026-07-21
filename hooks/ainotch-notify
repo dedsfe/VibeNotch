@@ -11,6 +11,7 @@ ler e fecha a ilha. Quem e (source) vem da env AINOTCH_SOURCE.
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -55,6 +56,93 @@ def enviar(payload):
     return True
 
 
+def descobrir_tty():
+    """Qual terminal esta rodando este CLI, pra ilha saber pra onde pular.
+
+    O hook nasce sem tty (o Claude Code o solta do terminal), entao sobe
+    a arvore de processos ate achar quem tem: o proprio `claude`."""
+    pid = os.getpid()
+    for _ in range(8):
+        try:
+            saida = subprocess.run(
+                ["ps", "-o", "ppid=,tty=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+        if len(saida) < 2:
+            return ""
+        ppid, tty = saida[0], saida[1]
+        if tty != "??":
+            return f"/dev/{tty}"
+
+        try:
+            pid = int(ppid)
+        except ValueError:
+            return ""
+        if pid <= 1:
+            return ""
+    return ""
+
+
+def do_transcript(caminho):
+    """Le o .jsonl da sessao e devolve (titulo, ultima_fala).
+
+    O titulo e o mesmo que o Claude Code poe na aba do terminal: ele
+    grava uma linha {"type":"ai-title","aiTitle":...} e reescreve
+    conforme a conversa muda de assunto -- por isso vale a ultima."""
+    titulo, ultima = "", ""
+    if not caminho:
+        return titulo, ultima
+
+    try:
+        with open(caminho, errors="ignore") as f:
+            for linha in f:
+                try:
+                    dados = json.loads(linha)
+                except ValueError:
+                    continue
+
+                tipo = dados.get("type")
+                if tipo == "ai-title":
+                    titulo = dados.get("aiTitle") or titulo
+                elif tipo == "assistant":
+                    blocos = (dados.get("message") or {}).get("content") or []
+                    for bloco in blocos:
+                        if not isinstance(bloco, dict):
+                            continue
+                        if bloco.get("type") != "text":
+                            continue
+                        texto = (bloco.get("text") or "").strip()
+                        if texto:
+                            ultima = texto
+    except OSError:
+        pass
+
+    return titulo, ultima
+
+
+def frase(texto, limite=130):
+    """Ultima linha util da fala, limpa de markdown pra caber na ilha.
+
+    A ultima linha costuma ser o fecho ("commitei X, quer que eu Y?"),
+    que e justamente o que diz se acabou e o que ficou pendente."""
+    linhas = [l.strip() for l in str(texto).splitlines() if l.strip()]
+    if not linhas:
+        return ""
+
+    linha = linhas[-1]
+    for lixo in ("**", "`", "##", "#"):
+        linha = linha.replace(lixo, "")
+    linha = linha.lstrip("-*> ").strip()
+    linha = " ".join(linha.split())
+
+    if len(linha) > limite:
+        linha = linha[: limite - 3] + "..."
+    return linha
+
+
 def ler_payload():
     """Codex manda por argv, o resto por stdin."""
     bruto = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
@@ -75,28 +163,45 @@ def main():
     nome = NOMES.get(fonte, fonte)
     projeto = os.path.basename(entrada.get("cwd") or os.getcwd())
 
-    # Notification do Gemini costuma trazer o texto do aviso junto.
-    extra = entrada.get("message") or entrada.get("last-assistant-message") or ""
-    extra = " ".join(str(extra).split())
-    if len(extra) > 120:
-        extra = extra[:117] + "..."
+    # Claude Code so manda o caminho do transcript: titulo e ultima fala
+    # saem de la. Gemini e Codex ja mandam o texto pronto no payload.
+    titulo, ultima_fala = do_transcript(entrada.get("transcript_path"))
+    extra = frase(
+        entrada.get("message")
+        or entrada.get("last-assistant-message")
+        or ultima_fala
+    )
 
-    linha = f"{nome} {verbo} — {projeto}"
+    # Sem titulo (conversa curta demais pro Claude nomear), a pasta serve.
+    if not titulo:
+        titulo = projeto
+
+    linha = f"{nome} {verbo}"
     if extra:
         linha += f"\n{extra}"
 
     ok = enviar({
         "type": "message",
         "message": linha,
+        "title": titulo,
+        "project": projeto,
         "source": fonte,
         "state": estado,
         "session": entrada.get("session_id", ""),
+        "tty": descobrir_tty(),
+        "term": os.environ.get("TERM_PROGRAM", ""),
     })
     if not ok:
         return  # app fechado, nada a fazer
 
     time.sleep(TEMPO_NA_TELA)
-    enviar({"type": "close"})
+    # Sem o id, a ilha nao sabe qual sessao recolher e todas ficavam
+    # acumuladas na lista pra sempre.
+    enviar({
+        "type": "close",
+        "session": entrada.get("session_id", ""),
+        "source": fonte,
+    })
 
 
 if __name__ == "__main__":

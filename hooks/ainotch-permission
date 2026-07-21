@@ -13,6 +13,7 @@ prompt normal no terminal. Nunca bloqueia por conta propria.
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 from urllib.parse import urlparse
@@ -129,6 +130,36 @@ def gravar_regra(nova):
         pass  # sem permissao gravada, mas a acao desta vez ja foi aprovada
 
 
+def descobrir_tty():
+    """Qual terminal esta rodando este CLI, pra ilha saber pra onde pular.
+
+    O hook nasce sem tty (o Claude Code o solta do terminal), entao sobe
+    a arvore de processos ate achar quem tem: o proprio `claude`."""
+    pid = os.getpid()
+    for _ in range(8):
+        try:
+            saida = subprocess.run(
+                ["ps", "-o", "ppid=,tty=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+        if len(saida) < 2:
+            return ""
+        ppid, tty = saida[0], saida[1]
+        if tty != "??":
+            return f"/dev/{tty}"
+
+        try:
+            pid = int(ppid)
+        except ValueError:
+            return ""
+        if pid <= 1:
+            return ""
+    return ""
+
+
 def perguntar(texto, permissao):
     """Devolve "allow", "always", "deny" ou None (app fora do ar)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -143,6 +174,8 @@ def perguntar(texto, permissao):
             "type": "prompt",
             "message": texto,
             "rule": permissao,
+            "tty": descobrir_tty(),
+            "term": os.environ.get("TERM_PROGRAM", ""),
         }).encode())
         s.settimeout(ANSWER_TIMEOUT)
         resposta = s.recv(1024).decode().strip().lower()
