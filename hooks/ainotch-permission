@@ -2,24 +2,47 @@
 """Ponte entre o Claude Code e o AINotch (Vibe Island caseiro).
 
 Recebe o payload do hook no stdin, manda o pedido de permissao pro app
-na porta 8123 e espera o clique em Allow/Deny na ilha.
+na porta 8123 e espera o clique na ilha: Allow, Sempre ou Deny.
+
+"Sempre" grava uma regra em ~/.claude/settings.local.json. A partir dai
+o proprio Claude Code aprova sozinho e este hook nem chega a rodar.
 
 Se o app nao estiver rodando, sai calado -> o Claude Code mostra o
 prompt normal no terminal. Nunca bloqueia por conta propria.
 """
 import json
+import os
 import socket
 import sys
+import tempfile
+from urllib.parse import urlparse
 
 HOST = "127.0.0.1"
 PORT = 8123
 CONNECT_TIMEOUT = 0.5   # app no ar ou nao: decide rapido
 ANSWER_TIMEOUT = 3600   # tempo pro Andre clicar
 
+SETTINGS = os.path.expanduser("~/.claude/settings.local.json")
+
 # Estas nao sao permissao sim/nao: pedem uma escolha ou um texto.
 # Allow/Deny na ilha nao responderia nada e a pergunta ficaria travada
 # no terminal -- entao deixa passar direto pro Claude Code.
 TOOLS_IGNORADAS = {"AskUserQuestion", "ExitPlanMode"}
+
+# Comandos onde o primeiro token e generico demais: liberar "git" inteiro
+# e cheque em branco, "git status" e especifico. Nestes a regra leva o
+# subcomando junto.
+COM_SUBCOMANDO = {
+    "git", "gh", "npm", "npx", "yarn", "pnpm", "cargo", "brew", "docker",
+    "kubectl", "pip", "pip3", "python", "python3", "go", "swift", "xcrun",
+    "bundle", "make", "vercel", "supabase",
+}
+
+# Se o comando tem qualquer um destes, ele encadeia outra coisa e o
+# primeiro token nao representa o que vai rodar de fato. Sem regra.
+PERIGOSOS = ("|", "&&", "||", ";", ">", "<", "$(", "`", "\n")
+
+FERRAMENTAS_DE_ARQUIVO = ("Read", "Edit", "Write", "NotebookEdit")
 
 
 def resumo(payload):
@@ -29,7 +52,7 @@ def resumo(payload):
 
     if tool == "Bash":
         detalhe = entrada.get("command", "")
-    elif tool in ("Write", "Edit", "Read", "NotebookEdit"):
+    elif tool in FERRAMENTAS_DE_ARQUIVO:
         detalhe = entrada.get("file_path", "")
     elif tool == "WebFetch":
         detalhe = entrada.get("url", "")
@@ -43,8 +66,71 @@ def resumo(payload):
     return f"{tool}: {detalhe}" if detalhe else tool
 
 
-def perguntar(texto):
-    """Devolve True (allow), False (deny) ou None (app fora do ar)."""
+def regra(payload):
+    """Regra de permissao pro botao "Sempre", ou "" se nao der pra gerar
+    uma que seja estreita o suficiente pra ser segura.
+
+    String vazia = a ilha esconde o botao. Melhor nao oferecer do que
+    oferecer um curinga que libera meio sistema num clique."""
+    tool = payload.get("tool_name", "")
+    entrada = payload.get("tool_input") or {}
+
+    if tool == "Bash":
+        comando = str(entrada.get("command", "")).strip()
+        if not comando or any(p in comando for p in PERIGOSOS):
+            return ""
+        tokens = comando.split()
+        base = tokens[0]
+        if base in COM_SUBCOMANDO:
+            # sem subcomando nomeado nao da pra estreitar: nao oferece
+            if len(tokens) < 2 or tokens[1].startswith("-"):
+                return ""
+            base = f"{base} {tokens[1]}"
+        return f"Bash({base}:*)"
+
+    if tool == "WebFetch":
+        host = urlparse(str(entrada.get("url", ""))).hostname
+        return f"WebFetch(domain:{host})" if host else ""
+
+    if tool in FERRAMENTAS_DE_ARQUIVO:
+        caminho = str(entrada.get("file_path", ""))
+        pasta = os.path.dirname(caminho)
+        if not pasta or pasta == "/":
+            return ""
+        # caminho absoluto no formato do Claude Code: Edit(//pasta/**)
+        return f"{tool}(//{pasta.lstrip('/')}/**)"
+
+    return ""
+
+
+def gravar_regra(nova):
+    """Adiciona a regra em permissions.allow. Escrita atomica pra nao
+    torrar o settings se algo explodir no meio."""
+    try:
+        with open(SETTINGS) as f:
+            dados = json.load(f)
+    except (OSError, ValueError):
+        dados = {}
+
+    permissoes = dados.setdefault("permissions", {})
+    liberadas = permissoes.setdefault("allow", [])
+    if nova in liberadas:
+        return
+    liberadas.append(nova)
+
+    pasta = os.path.dirname(SETTINGS)
+    try:
+        fd, temporario = tempfile.mkstemp(dir=pasta, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(dados, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(temporario, SETTINGS)
+    except OSError:
+        pass  # sem permissao gravada, mas a acao desta vez ja foi aprovada
+
+
+def perguntar(texto, permissao):
+    """Devolve "allow", "always", "deny" ou None (app fora do ar)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(CONNECT_TIMEOUT)
     try:
@@ -53,7 +139,11 @@ def perguntar(texto):
         return None
 
     try:
-        s.sendall(json.dumps({"type": "prompt", "message": texto}).encode())
+        s.sendall(json.dumps({
+            "type": "prompt",
+            "message": texto,
+            "rule": permissao,
+        }).encode())
         s.settimeout(ANSWER_TIMEOUT)
         resposta = s.recv(1024).decode().strip().lower()
     except OSError:
@@ -61,10 +151,12 @@ def perguntar(texto):
     finally:
         s.close()
 
+    if resposta.startswith("a"):
+        return "always"
     if resposta.startswith("y"):
-        return True
+        return "allow"
     if resposta.startswith("n"):
-        return False
+        return "deny"
     return None
 
 
@@ -77,9 +169,13 @@ def main():
     if payload.get("tool_name") in TOOLS_IGNORADAS:
         return
 
-    decisao = perguntar(resumo(payload))
+    permissao = regra(payload)
+    decisao = perguntar(resumo(payload), permissao)
     if decisao is None:
         return  # sem saida = Claude Code pergunta do jeito dele
+
+    if decisao == "always" and permissao:
+        gravar_regra(permissao)
 
     # PermissionRequest tem schema proprio: decision.behavior, e nao o
     # permissionDecision do PreToolUse. Com o campo errado o Claude Code
@@ -87,7 +183,7 @@ def main():
     json.dump({
         "hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
-            "decision": {"behavior": "allow" if decisao else "deny"},
+            "decision": {"behavior": "deny" if decisao == "deny" else "allow"},
         }
     }, sys.stdout)
 

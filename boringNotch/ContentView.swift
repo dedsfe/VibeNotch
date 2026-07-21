@@ -780,7 +780,8 @@ class AIAgentWrapper: ObservableObject {
                             self?.pendingConnections[sessionID] = connection
                             self?.upsert(
                                 id: sessionID, source: rawSource, name: displayName,
-                                project: project, state: .waiting, message: promptText
+                                project: project, state: .waiting, message: promptText,
+                                rule: dict["rule"] as? String ?? ""
                             )
                             // Quem pede aprovacao rouba o foco: e o unico que trava o CLI.
                             self?.focusedSessionID = sessionID
@@ -839,19 +840,21 @@ class AIAgentWrapper: ObservableObject {
     /// Cria ou atualiza a linha daquela sessao na lista.
     private func upsert(
         id: String, source: String, name: String,
-        project: String, state: AISessionState, message: String
+        project: String, state: AISessionState, message: String,
+        rule: String = ""
     ) {
         if let i = sessions.firstIndex(where: { $0.id == id }) {
             sessions[i].source = source
             sessions[i].name = name
             sessions[i].state = state
             sessions[i].message = message
+            sessions[i].rule = rule
             sessions[i].updatedAt = Date()
             if !project.isEmpty { sessions[i].project = project }
         } else {
             sessions.append(AISession(
                 id: id, source: source, name: name,
-                project: project, state: state, message: message
+                project: project, state: state, message: message, rule: rule
             ))
         }
     }
@@ -862,6 +865,11 @@ class AIAgentWrapper: ObservableObject {
 
     func deny(sessionID: String) {
         respond("n\n", to: sessionID)
+    }
+
+    /// Aprova e manda o hook gravar a regra em settings.local.json.
+    func alwaysAllow(sessionID: String) {
+        respond("a\n", to: sessionID)
     }
 
     // Compatibilidade: sem id, responde quem esta em foco.
@@ -880,6 +888,7 @@ class AIAgentWrapper: ObservableObject {
         if let i = sessions.firstIndex(where: { $0.id == sessionID }) {
             sessions[i].state = .working
             sessions[i].message = ""
+            sessions[i].rule = ""
         }
 
         // Se ainda tem outro CLI travado, a ilha continua nele.
@@ -1037,6 +1046,9 @@ struct AISession: Identifiable {
     var project: String      // pasta onde ele esta rodando
     var state: AISessionState
     var message: String
+    /// Regra que o botao "Sempre" gravaria (ex: "Bash(git status:*)").
+    /// Vazia = o hook nao conseguiu estreitar o suficiente, esconde o botao.
+    var rule: String = ""
     var updatedAt: Date = Date()
 
     var isWaiting: Bool { state == .waiting }
@@ -1149,10 +1161,10 @@ struct AISessionListView: View {
 
                     Spacer(minLength: 0)
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Button(action: { agentWrapper.deny(sessionID: focused.id) }) {
                             Text("Deny")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 7)
@@ -1161,9 +1173,25 @@ struct AISessionListView: View {
                         }
                         .buttonStyle(PlainButtonStyle())
 
+                        // So aparece quando o hook conseguiu gerar uma regra
+                        // estreita: sem isso, um clique liberaria demais.
+                        if !focused.rule.isEmpty {
+                            Button(action: { agentWrapper.alwaysAllow(sessionID: focused.id) }) {
+                                Text("Sempre")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(Color.orange.opacity(0.35))
+                                    .cornerRadius(7)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .help("Libera \(focused.rule) pra sempre em settings.local.json")
+                        }
+
                         Button(action: { agentWrapper.approve(sessionID: focused.id) }) {
                             Text("Allow")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundColor(.black)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 7)
@@ -1171,6 +1199,16 @@ struct AISessionListView: View {
                                 .cornerRadius(7)
                         }
                         .buttonStyle(PlainButtonStyle())
+                    }
+
+                    // Mostra exatamente o que o "Sempre" vai gravar.
+                    if !focused.rule.isEmpty {
+                        Text(focused.rule)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.orange.opacity(0.8))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .frame(width: 250)
