@@ -8,7 +8,7 @@ Sem ordem de prioridade — é inventário.
 3. **Botão Bypass** — terceira opção além de Allow/Deny
 4. **Atalhos de teclado** — ⌘Y/⌘N pra allow/deny, ⌘1/2/3 pra escolhas
 5. **AskUserQuestion na ilha** — opções numeradas com título + descrição (hoje ignoramos)
-6. **Atividade ao vivo** — tool calls correndo ("Writing middleware.ts", Read/Edit) via PostToolUse
+6. ~~**Atividade ao vivo**~~ ✅ feito — PostToolUse/UserPromptSubmit viram "activity" silencioso (linha + painel em tempo real, sem banner); melhoria futura: PreToolUse pra tools longas
 7. **Pill no notch fechado** — "Working…/Running" + ícones dos agentes + contador "3 sessions"
 8. **Badge de modelo** (Fable 5, GPT-5.6) e **badge do terminal** (iTerm/Ghostty/Cursor) por sessão
 9. **Tempo decorrido por sessão** (27m, 1h, <1m)

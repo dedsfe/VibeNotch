@@ -894,6 +894,21 @@ class AIAgentWrapper: ObservableObject {
                             self?.permissionPrompt = msgText
                             self?.isShowingMessage = true
                         }
+                    } else if type == "activity", let msgText = dict["message"] as? String {
+                        // Batimento de tool call: so atualiza a linha e o
+                        // painel. Nao abre banner, nao recolhe, nao mexe em
+                        // socket -- por isso nao e um "message".
+                        DispatchQueue.main.async {
+                            self?.upsert(
+                                id: sessionID, source: rawSource, name: displayName,
+                                project: project, state: .working, message: msgText,
+                                tty: dict["tty"] as? String ?? "",
+                                term: dict["term"] as? String ?? ""
+                            )
+                            if self?.focusedSession?.isWaiting != true {
+                                self?.focusedSessionID = sessionID
+                            }
+                        }
                     } else if type == "close" {
                         DispatchQueue.main.async {
                             self?.pendingConnections.removeValue(forKey: sessionID)
@@ -1324,7 +1339,8 @@ struct AISessionListView: View {
             if let focused = agentWrapper.focusedSession, !focused.message.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
-                        Text(focused.isWaiting ? "⚠️" : "✅").font(.system(size: 10))
+                        Text(focused.isWaiting ? "⚠️" : (focused.state == .working ? "⏳" : "✅"))
+                            .font(.system(size: 10))
                         Text(focused.title.isEmpty ? focused.name : focused.title)
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.white)

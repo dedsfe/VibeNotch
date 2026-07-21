@@ -30,7 +30,12 @@ NOMES = {
 
 # Eventos que so registram presenca: manda e sai, sem esperar nem
 # recolher a ilha -- e um "oi, existo", nao um "acabei".
-SO_REGISTRA = {"SessionStart", "UserPromptSubmit"}
+SO_REGISTRA = {"SessionStart"}
+
+# Batimento cardiaco: a cada tool call ou prompt, atualiza a linha da
+# sessao sem abrir banner nem recolher nada. Leve de proposito -- roda
+# dezenas de vezes por conversa, entao nada de ler transcript ou quota.
+ATIVIDADE = {"PostToolUse", "UserPromptSubmit"}
 
 # evento -> (state, verbo). Cobre Claude, Gemini/Antigravity e Codex.
 ESTADOS = {
@@ -199,6 +204,29 @@ def frase(texto, limite=130):
     return linha
 
 
+def linha_de_atividade(entrada):
+    """O que a sessao esta fazendo agora, curto o bastante pra ilha."""
+    tool = entrada.get("tool_name", "")
+    dados = entrada.get("tool_input") or {}
+
+    if tool == "Bash":
+        detalhe = dados.get("command", "")
+    elif tool in ("Read", "Edit", "Write", "NotebookEdit"):
+        detalhe = os.path.basename(str(dados.get("file_path", "")))
+    elif tool == "WebFetch":
+        detalhe = dados.get("url", "")
+    elif tool in ("Grep", "Glob"):
+        detalhe = dados.get("pattern", "")
+    else:
+        detalhe = ""
+
+    detalhe = " ".join(str(detalhe).split())
+    if len(detalhe) > 70:
+        detalhe = detalhe[:67] + "..."
+
+    return f"{tool}: {detalhe}" if detalhe else (tool or "…")
+
+
 def ler_payload():
     """Codex manda por argv, o resto por stdin."""
     bruto = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
@@ -218,6 +246,29 @@ def main():
     fonte = os.environ.get("AINOTCH_SOURCE", "claude")
     nome = NOMES.get(fonte, fonte)
     projeto = os.path.basename(entrada.get("cwd") or os.getcwd())
+
+    # Batimento: atualiza a linha e sai. Nada de transcript, quota,
+    # banner ou close -- isso roda a cada tool call.
+    if evento in ATIVIDADE:
+        if evento == "UserPromptSubmit":
+            extra = " ".join(str(entrada.get("prompt", "")).split())
+            if len(extra) > 90:
+                extra = extra[:87] + "..."
+            extra = f"Você: {extra}" if extra else "…"
+        else:
+            extra = linha_de_atividade(entrada)
+
+        enviar({
+            "type": "activity",
+            "message": f"{nome} trabalhando\n{extra}",
+            "project": projeto,
+            "source": fonte,
+            "state": "working",
+            "session": entrada.get("session_id", ""),
+            "tty": descobrir_tty(),
+            "term": os.environ.get("TERM_PROGRAM", ""),
+        })
+        return
 
     # Claude Code so manda o caminho do transcript: titulo e ultima fala
     # saem de la. Gemini e Codex ja mandam o texto pronto no payload.
