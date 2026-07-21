@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 HOST = "127.0.0.1"
@@ -60,6 +61,55 @@ def enviar(payload):
     finally:
         s.close()
     return True
+
+
+CACHE_USO = os.path.join(tempfile.gettempdir(), "ainotch-usage.json")
+
+
+def uso():
+    """Utilizacao 5h/7d da conta Claude, ou None se nao der.
+
+    Mesmo caminho que o /usage do CLI: token OAuth no Keychain + endpoint
+    oauth/usage. Cache de 60s pra nao bater na API a cada prompt."""
+    try:
+        with open(CACHE_USO) as f:
+            guardado = json.load(f)
+        if time.time() - guardado.get("ts", 0) < 60:
+            return guardado.get("usage")
+    except (OSError, ValueError):
+        pass
+
+    try:
+        credencial = subprocess.run(
+            ["security", "find-generic-password",
+             "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        token = json.loads(credencial)["claudeAiOauth"]["accessToken"]
+
+        bruto = subprocess.run(
+            ["curl", "-s", "-m", "4",
+             "https://api.anthropic.com/api/oauth/usage",
+             "-H", f"Authorization: Bearer {token}",
+             "-H", "anthropic-beta: oauth-2025-04-20"],
+            capture_output=True, text=True, timeout=6,
+        ).stdout
+        dados = json.loads(bruto)
+
+        resultado = {
+            "five": (dados.get("five_hour") or {}).get("utilization"),
+            "seven": (dados.get("seven_day") or {}).get("utilization"),
+            "seven_resets": (dados.get("seven_day") or {}).get("resets_at") or "",
+        }
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return None
+
+    try:
+        with open(CACHE_USO, "w") as f:
+            json.dump({"ts": time.time(), "usage": resultado}, f)
+    except OSError:
+        pass
+    return resultado
 
 
 def descobrir_tty():
@@ -196,6 +246,9 @@ def main():
         "session": entrada.get("session_id", ""),
         "tty": descobrir_tty(),
         "term": os.environ.get("TERM_PROGRAM", ""),
+        # So o Claude tem esse endpoint; os outros CLIs mandam None e a
+        # ilha simplesmente mantem o ultimo valor que viu.
+        "usage": uso() if fonte == "claude" else None,
     })
     if not ok:
         return  # app fechado, nada a fazer

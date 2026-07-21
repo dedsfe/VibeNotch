@@ -727,6 +727,11 @@ class AIAgentWrapper: ObservableObject {
     /// como sinal de "pode fechar".
     @Published var collapseTick: Int = 0
 
+    /// Utilizacao da conta Claude (0-100), vinda do hook junto com os
+    /// eventos. -1 = ainda nao sabemos.
+    @Published var usageFiveHour: Double = -1
+    @Published var usageSevenDay: Double = -1
+
     /// Quantas conversas terminadas ficam guardadas pra voltar nelas.
     private let limiteDeSessoes = 5
 
@@ -831,6 +836,14 @@ class AIAgentWrapper: ObservableObject {
                 if let jsonData = message.data(using: .utf8),
                    let dict = try? JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any],
                    let type = dict["type"] as? String {
+
+                    // Medidor de uso pega carona em qualquer evento do Claude.
+                    if let uso = dict["usage"] as? [String: Any] {
+                        DispatchQueue.main.async {
+                            if let cinco = uso["five"] as? Double { self?.usageFiveHour = cinco }
+                            if let sete = uso["seven"] as? Double { self?.usageSevenDay = sete }
+                        }
+                    }
 
                     let rawSource = dict["source"] as? String ?? "claude"
                     let displayName = Self.sourceNames[rawSource] ?? rawSource.capitalized
@@ -1164,6 +1177,32 @@ struct AISession: Identifiable {
     var isWaiting: Bool { state == .waiting }
 }
 
+/// "5h 12%" com cor subindo junto com o consumo.
+struct UsageBadge: View {
+    let label: String
+    let value: Double  // 0-100; negativo = sem dado
+
+    private var cor: Color {
+        if value >= 80 { return .red }
+        if value >= 50 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        if value >= 0 {
+            HStack(spacing: 2) {
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.white.opacity(0.45))
+                Text("\(Int(value.rounded()))%")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(cor.opacity(0.95))
+            }
+            .fixedSize()
+        }
+    }
+}
+
 /// Linha da lista: bolinha de estado + quem e + onde esta.
 struct AISessionRow: View {
     let session: AISession
@@ -1228,18 +1267,47 @@ struct AISessionListView: View {
                     Text("Agentes")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.white.opacity(0.9))
+
                     Spacer(minLength: 4)
+
                     if agentWrapper.waitingCount > 0 {
                         Text("\(agentWrapper.waitingCount) esperando")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.orange)
                             .fixedSize()
                     }
+
+                    // Medidor de uso da conta Claude, estilo /usage do CLI.
+                    // Numa capsula propria pra nao se misturar com o titulo;
+                    // rotulado porque o numero e da conta Claude, nao dos
+                    // outros CLIs que estiverem na lista.
+                    if agentWrapper.usageSevenDay >= 0 {
+                        HStack(spacing: 5) {
+                            Text("claude")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.35))
+                            UsageBadge(label: "5h", value: agentWrapper.usageFiveHour)
+                            Text("·")
+                                .font(.system(size: 9))
+                                .foregroundColor(.white.opacity(0.2))
+                            UsageBadge(label: "7d", value: agentWrapper.usageSevenDay)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(Color.white.opacity(0.07)))
+                        .fixedSize()
+                    }
                 }
 
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: 3) {
-                        ForEach(agentWrapper.sessions) { session in
+                        // Quem espera resposta em cima; o resto por ultimo
+                        // visto. O "agrupamento" por CLI acontece sozinho.
+                        let ordenadas = agentWrapper.sessions.sorted {
+                            if $0.isWaiting != $1.isWaiting { return $0.isWaiting }
+                            return $0.updatedAt > $1.updatedAt
+                        }
+                        ForEach(ordenadas) { session in
                             AISessionRow(
                                 session: session,
                                 isSelected: session.id == agentWrapper.focusedSession?.id
