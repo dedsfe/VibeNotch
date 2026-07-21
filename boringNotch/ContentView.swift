@@ -727,10 +727,10 @@ class AIAgentWrapper: ObservableObject {
     /// como sinal de "pode fechar".
     @Published var collapseTick: Int = 0
 
-    /// Utilizacao da conta Claude (0-100), vinda do hook junto com os
-    /// eventos. -1 = ainda nao sabemos.
-    @Published var usageFiveHour: Double = -1
-    @Published var usageSevenDay: Double = -1
+    /// Utilizacao (0-100) por provedor ("claude", "codex", ...), vinda do
+    /// hook junto com os eventos. Cada provedor com fonte de quota ganha
+    /// sua propria capsula no header.
+    @Published var usageByProvider: [String: AIUsage] = [:]
 
     /// Quantas conversas terminadas ficam guardadas pra voltar nelas.
     private let limiteDeSessoes = 5
@@ -837,15 +837,17 @@ class AIAgentWrapper: ObservableObject {
                    let dict = try? JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any],
                    let type = dict["type"] as? String {
 
-                    // Medidor de uso pega carona em qualquer evento do Claude.
+                    let rawSource = dict["source"] as? String ?? "claude"
+
+                    // Medidor de uso pega carona em qualquer evento; cada
+                    // provedor guarda o seu.
                     if let uso = dict["usage"] as? [String: Any] {
+                        let cinco = uso["five"] as? Double ?? -1
+                        let sete = uso["seven"] as? Double ?? -1
                         DispatchQueue.main.async {
-                            if let cinco = uso["five"] as? Double { self?.usageFiveHour = cinco }
-                            if let sete = uso["seven"] as? Double { self?.usageSevenDay = sete }
+                            self?.usageByProvider[rawSource] = AIUsage(five: cinco, seven: sete)
                         }
                     }
-
-                    let rawSource = dict["source"] as? String ?? "claude"
                     let displayName = Self.sourceNames[rawSource] ?? rawSource.capitalized
                     // Sem session id, cada CLI vira uma linha so (por origem).
                     let sessionID = (dict["session"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -1177,6 +1179,12 @@ struct AISession: Identifiable {
     var isWaiting: Bool { state == .waiting }
 }
 
+/// Utilizacao 5h/7d de um provedor. -1 = sem dado naquela janela.
+struct AIUsage: Equatable {
+    var five: Double
+    var seven: Double
+}
+
 /// "5h 12%" com cor subindo junto com o consumo.
 struct UsageBadge: View {
     let label: String
@@ -1277,26 +1285,8 @@ struct AISessionListView: View {
                             .fixedSize()
                     }
 
-                    // Medidor de uso da conta Claude, estilo /usage do CLI.
-                    // Numa capsula propria pra nao se misturar com o titulo;
-                    // rotulado porque o numero e da conta Claude, nao dos
-                    // outros CLIs que estiverem na lista.
-                    if agentWrapper.usageSevenDay >= 0 {
-                        HStack(spacing: 5) {
-                            Text("claude")
-                                .font(.system(size: 8.5, weight: .semibold))
-                                .foregroundColor(.white.opacity(0.35))
-                            UsageBadge(label: "5h", value: agentWrapper.usageFiveHour)
-                            Text("·")
-                                .font(.system(size: 9))
-                                .foregroundColor(.white.opacity(0.2))
-                            UsageBadge(label: "7d", value: agentWrapper.usageSevenDay)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(Capsule().fill(Color.white.opacity(0.07)))
-                        .fixedSize()
-                    }
+                    // O medidor de uso nao mora mais aqui: espremia o
+                    // titulo. Ele aparece no painel da sessao em foco.
                 }
 
                 ScrollView(.vertical, showsIndicators: false) {
@@ -1312,14 +1302,16 @@ struct AISessionListView: View {
                                 session: session,
                                 isSelected: session.id == agentWrapper.focusedSession?.id
                             )
-                            .onTapGesture {
+                            // Duplo clique ANTES do simples: SwiftUI testa na
+                            // ordem e o de 2 toques precisa ganhar a disputa.
+                            .onTapGesture(count: 2) {
                                 agentWrapper.focus(on: session.id)
-                                // Quem espera resposta se responde aqui mesmo;
-                                // pular pro terminal so atrapalharia. O resto
-                                // e "quero voltar pra essa conversa".
-                                if !session.isWaiting {
-                                    agentWrapper.jumpToTerminal(sessionID: session.id)
-                                }
+                                agentWrapper.jumpToTerminal(sessionID: session.id)
+                            }
+                            .onTapGesture {
+                                // 1 clique so poe em foco (mostra painel e
+                                // quota); quem quer o terminal clica 2x.
+                                agentWrapper.focus(on: session.id)
                             }
                         }
                     }
@@ -1339,6 +1331,22 @@ struct AISessionListView: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                         Spacer(minLength: 0)
+
+                        // Quota da conta DESSA sessao, so quando ela esta
+                        // em foco -- no header espremia o titulo da lista.
+                        if let uso = agentWrapper.usageByProvider[focused.source] {
+                            HStack(spacing: 4) {
+                                UsageBadge(label: "5h", value: uso.five)
+                                Text("·")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.white.opacity(0.2))
+                                UsageBadge(label: "7d", value: uso.seven)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.white.opacity(0.07)))
+                            .fixedSize()
+                        }
                     }
 
                     Text(focused.message)
