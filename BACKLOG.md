@@ -14,7 +14,7 @@ Sem ordem de prioridade — é inventário.
 9. **Tempo decorrido por sessão** (27m, 1h, <1m)
 10. **"You: <último prompt>"** no header + formato "projeto · título da task"
 11. **Fecho formatado** — resumo multi-linha com bullets do que foi feito (não só 1 frase)
-12. **Arquivar sessão** (lixeira) e **pop-out** da ilha (⌥⇥↗)
+12. ~~**Arquivar sessão** (lixeira)~~ ✅ feito — botão lápis no header liga modo editar; cada linha ganha um x pra remover (quem espera clique fica bloqueado, apagar travaria o CLI). Falta **pop-out** da ilha (⌥⇥↗)
 13. **Sound alerts 8-bit** por evento + toggle de som e engrenagem de settings na ilha
 14. **Plan Review** — plano em Markdown renderizado na ilha + campo de feedback (ExitPlanMode)
 15. **Zero Config** — auto-configura hooks de todos os CLIs num clique

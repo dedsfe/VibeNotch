@@ -840,6 +840,17 @@ class AIAgentWrapper: ObservableObject {
         focusedSessionID = sessionID
     }
 
+    /// Tira a sessao da lista (modo editar). Quem espera clique nao sai:
+    /// apagar o pedido deixaria o CLI travado esperando pra sempre.
+    func remover(_ sessionID: String) {
+        guard sessions.first(where: { $0.id == sessionID })?.isWaiting != true else { return }
+        sessions.removeAll { $0.id == sessionID }
+        pendingConnections.removeValue(forKey: sessionID)
+        if focusedSessionID == sessionID {
+            focusedSessionID = sessions.first?.id
+        }
+    }
+
     /// Traz pra frente a aba do terminal onde essa sessao esta rodando.
     /// Casa pelo tty, que e o unico id estavel: titulo de aba muda sozinho.
     func jumpToTerminal(sessionID: String) {
@@ -1413,6 +1424,8 @@ struct AISessionRow: View {
 /// mostra o pedido dela com Allow/Deny.
 struct AISessionListView: View {
     @ObservedObject var agentWrapper: AIAgentWrapper
+    /// Lapis ligado: as linhas mostram o x de apagar.
+    @State private var editando = false
 
     /// A ilha tem 190px fixos: a lista rola, o pedido em foco fica sempre visivel.
     var body: some View {
@@ -1434,6 +1447,14 @@ struct AISessionListView: View {
 
                     // O medidor de uso nao mora mais aqui: espremia o
                     // titulo. Ele aparece no painel da sessao em foco.
+
+                    // Modo editar: cada linha ganha um x pra sair da lista.
+                    Button { editando.toggle() } label: {
+                        Image(systemName: editando ? "checkmark.circle.fill" : "pencil.circle")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white.opacity(editando ? 0.9 : 0.45))
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 ScrollView(.vertical, showsIndicators: false) {
@@ -1445,20 +1466,35 @@ struct AISessionListView: View {
                             return $0.updatedAt > $1.updatedAt
                         }
                         ForEach(ordenadas) { session in
-                            AISessionRow(
-                                session: session,
-                                isSelected: session.id == agentWrapper.focusedSession?.id
-                            )
-                            // Duplo clique ANTES do simples: SwiftUI testa na
-                            // ordem e o de 2 toques precisa ganhar a disputa.
-                            .onTapGesture(count: 2) {
-                                agentWrapper.focus(on: session.id)
-                                agentWrapper.jumpToTerminal(sessionID: session.id)
-                            }
-                            .onTapGesture {
-                                // 1 clique so poe em foco (mostra painel e
-                                // quota); quem quer o terminal clica 2x.
-                                agentWrapper.focus(on: session.id)
+                            HStack(spacing: 4) {
+                                AISessionRow(
+                                    session: session,
+                                    isSelected: session.id == agentWrapper.focusedSession?.id
+                                )
+                                // Duplo clique ANTES do simples: SwiftUI testa na
+                                // ordem e o de 2 toques precisa ganhar a disputa.
+                                .onTapGesture(count: 2) {
+                                    agentWrapper.focus(on: session.id)
+                                    agentWrapper.jumpToTerminal(sessionID: session.id)
+                                }
+                                .onTapGesture {
+                                    // 1 clique so poe em foco (mostra painel e
+                                    // quota); quem quer o terminal clica 2x.
+                                    agentWrapper.focus(on: session.id)
+                                }
+
+                                if editando {
+                                    // Quem espera clique nao pode sair (o x
+                                    // apagado avisa): sumir com o pedido
+                                    // travaria o CLI.
+                                    Button { agentWrapper.remover(session.id) } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.white.opacity(session.isWaiting ? 0.15 : 0.6))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(session.isWaiting)
+                                }
                             }
                         }
                     }
