@@ -997,6 +997,10 @@ class AIAgentWrapper: ObservableObject {
                                 tty: dict["tty"] as? String ?? "",
                                 term: dict["term"] as? String ?? ""
                             )
+                            if let prompt = dict["prompt"] as? String, !prompt.isEmpty,
+                               let i = self?.sessions.firstIndex(where: { $0.id == sessionID }) {
+                                self?.sessions[i].lastPrompt = prompt
+                            }
                             if self?.focusedSession?.isWaiting != true {
                                 self?.focusedSessionID = sessionID
                             }
@@ -1285,6 +1289,9 @@ struct AISession: Identifiable {
     var rule: String = ""
     /// Linhas de diff do pedido (prefixo "-"/"+"); so Edit/Write tem.
     var diff: [String] = []
+    /// Ultimo pedido do usuario ("Você: ..."), fixo no painel enquanto
+    /// os batimentos trocam a mensagem.
+    var lastPrompt: String = ""
     var updatedAt: Date = Date()
 
     var isWaiting: Bool { state == .waiting }
@@ -1350,6 +1357,16 @@ struct AISessionRow: View {
             }
 
             Spacer(minLength: 4)
+
+            // Ha quanto tempo essa sessao nao da sinal de vida.
+            TimelineView(.periodic(from: .now, by: 30)) { contexto in
+                let s = Int(contexto.date.timeIntervalSince(session.updatedAt))
+                let texto = s < 60 ? "<1m" : s < 3600 ? "\(s / 60)m" : "\(s / 3600)h"
+                Text(texto)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.35))
+                    .fixedSize()
+            }
 
             Text(session.state.label)
                 .font(.system(size: 9, weight: .medium))
@@ -1459,6 +1476,16 @@ struct AISessionListView: View {
                             .background(Capsule().fill(Color.white.opacity(0.07)))
                             .fixedSize()
                         }
+                    }
+
+                    // O que voce pediu, fixo, enquanto a mensagem embaixo
+                    // troca a cada tool call.
+                    if !focused.lastPrompt.isEmpty {
+                        Text(focused.lastPrompt)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.45))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
 
                     if focused.isWaiting && !focused.diff.isEmpty {

@@ -258,7 +258,7 @@ def main():
         else:
             extra = linha_de_atividade(entrada)
 
-        enviar({
+        pacote = {
             "type": "activity",
             "message": f"{nome} trabalhando\n{extra}",
             "project": projeto,
@@ -267,7 +267,12 @@ def main():
             "session": entrada.get("session_id", ""),
             "tty": descobrir_tty(),
             "term": os.environ.get("TERM_PROGRAM", ""),
-        })
+        }
+        # O prompt fica guardado na sessao ("Você: ...") mesmo depois
+        # que os batimentos de tool call passarem por cima da mensagem.
+        if evento == "UserPromptSubmit":
+            pacote["prompt"] = extra
+        enviar(pacote)
         return
 
     # Claude Code so manda o caminho do transcript: titulo e ultima fala
