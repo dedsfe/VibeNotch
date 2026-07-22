@@ -148,14 +148,16 @@ def descobrir_tty():
 
 
 def do_transcript(caminho):
-    """Le o .jsonl da sessao e devolve (titulo, ultima_fala).
+    """Le o .jsonl da sessao e devolve (titulo, ultima_fala, modelo).
 
     O titulo e o mesmo que o Claude Code poe na aba do terminal: ele
     grava uma linha {"type":"ai-title","aiTitle":...} e reescreve
-    conforme a conversa muda de assunto -- por isso vale a ultima."""
-    titulo, ultima = "", ""
+    conforme a conversa muda de assunto -- por isso vale a ultima.
+    O modelo sai do ultimo turno do assistente (message.model), pra
+    ilha mostrar badge (Opus 4.8 / Fable 5) e distinguir sessoes."""
+    titulo, ultima, modelo = "", "", ""
     if not caminho:
-        return titulo, ultima
+        return titulo, ultima, modelo
 
     try:
         with open(caminho, errors="ignore") as f:
@@ -169,7 +171,9 @@ def do_transcript(caminho):
                 if tipo == "ai-title":
                     titulo = dados.get("aiTitle") or titulo
                 elif tipo == "assistant":
-                    blocos = (dados.get("message") or {}).get("content") or []
+                    msg = dados.get("message") or {}
+                    modelo = msg.get("model") or modelo
+                    blocos = msg.get("content") or []
                     for bloco in blocos:
                         if not isinstance(bloco, dict):
                             continue
@@ -181,7 +185,7 @@ def do_transcript(caminho):
     except OSError:
         pass
 
-    return titulo, ultima
+    return titulo, ultima, modelo
 
 
 def frase(texto, limite=130):
@@ -282,7 +286,7 @@ def main():
 
     # Claude Code so manda o caminho do transcript: titulo e ultima fala
     # saem de la. Gemini e Codex ja mandam o texto pronto no payload.
-    titulo, ultima_fala = do_transcript(entrada.get("transcript_path"))
+    titulo, ultima_fala, modelo = do_transcript(entrada.get("transcript_path"))
     extra = frase(
         entrada.get("message")
         or entrada.get("last-assistant-message")
@@ -307,6 +311,7 @@ def main():
         "session": entrada.get("session_id", ""),
         "tty": descobrir_tty(),
         "term": os.environ.get("TERM_PROGRAM", ""),
+        "model": modelo,
         # So o Claude tem esse endpoint; os outros CLIs mandam None e a
         # ilha simplesmente mantem o ultimo valor que viu.
         "usage": uso() if fonte == "claude" else None,

@@ -1002,7 +1002,8 @@ class AIAgentWrapper: ObservableObject {
                                 project: project, state: state, message: msgText,
                                 title: dict["title"] as? String ?? "",
                                 tty: dict["tty"] as? String ?? "",
-                                term: dict["term"] as? String ?? ""
+                                term: dict["term"] as? String ?? "",
+                                model: dict["model"] as? String ?? ""
                             )
                             // SessionEnd: o CLI ja foi embora. So pinta a
                             // linha de "encerrada" -- sem foco, banner nem
@@ -1085,7 +1086,8 @@ class AIAgentWrapper: ObservableObject {
         id: String, source: String, name: String,
         project: String, state: AISessionState, message: String,
         rule: String = "", title: String = "",
-        tty: String = "", term: String = "", diff: [String] = []
+        tty: String = "", term: String = "", model: String = "",
+        diff: [String] = []
     ) {
         if let i = sessions.firstIndex(where: { $0.id == id }) {
             sessions[i].source = source
@@ -1100,6 +1102,7 @@ class AIAgentWrapper: ObservableObject {
             if !title.isEmpty { sessions[i].title = title }
             if !tty.isEmpty { sessions[i].tty = tty }
             if !term.isEmpty { sessions[i].term = term }
+            if !model.isEmpty { sessions[i].model = model }
         } else {
             // Mesma aba de terminal = mesma linha. Um restart ou /clear
             // troca o session_id, mas o tty fica -- sem isso cada sessao
@@ -1109,7 +1112,7 @@ class AIAgentWrapper: ObservableObject {
             }
             sessions.append(AISession(
                 id: id, source: source, name: name, project: project,
-                title: title, tty: tty, term: term,
+                title: title, tty: tty, term: term, model: model,
                 state: state, message: message, rule: rule, diff: diff
             ))
         }
@@ -1323,6 +1326,8 @@ struct AISession: Identifiable {
     /// pra ilha conseguir trazer a aba certa pra frente.
     var tty: String = ""
     var term: String = ""
+    /// Modelo cru do ultimo turno (ex: "claude-opus-4-8"), pra badge.
+    var model: String = ""
     var state: AISessionState
     var message: String
     /// Regra que o botao "Sempre" gravaria (ex: "Bash(git status:*)").
@@ -1352,6 +1357,22 @@ struct AISession: Identifiable {
         case "kitty": return "kitty"
         case "": return nil
         default: return term
+        }
+    }
+
+    /// Nome curto do modelo pra badge, ou nil quando ainda nao chegou
+    /// (so o Claude manda; os outros CLIs ficam sem ate ter fonte).
+    var modelLabel: String? {
+        guard !model.isEmpty else { return nil }
+        switch model {
+        case let m where m.contains("opus-4-8"): return "Opus 4.8"
+        case let m where m.contains("opus-4"): return "Opus 4"
+        case let m where m.contains("fable-5"): return "Fable 5"
+        case let m where m.contains("sonnet-5"): return "Sonnet 5"
+        case let m where m.contains("sonnet"): return "Sonnet"
+        case let m where m.contains("haiku"): return "Haiku"
+        case let m where m.contains("opus"): return "Opus"
+        default: return model
         }
     }
 }
@@ -1413,6 +1434,17 @@ struct AISessionRow: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.white.opacity(0.08)))
+                    .fixedSize()
+            }
+
+            // Qual modelo ta rodando: Opus 4.8, Fable 5, etc.
+            if let modelo = session.modelLabel {
+                Text(modelo)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.55))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
                     .fixedSize()
             }
 
