@@ -896,10 +896,21 @@ class AIAgentWrapper: ObservableObject {
         }
 
         // AppleScript pode travar alguns segundos esperando o app responder.
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var erro: NSDictionary?
             NSAppleScript(source: script)?.executeAndReturnError(&erro)
-            if let erro { print("Pulo pro terminal falhou: \(erro)") }
+            guard let erro else { return }
+            print("Pulo pro terminal falhou: \(erro)")
+
+            // -1743 = usuario ainda nao autorizou Automacao; a cada rebuild
+            // Debug (assinatura ad-hoc) o grant do Terminal some. Sem avisar,
+            // o clique so nao fazia nada. Mostra o motivo na ilha.
+            let codigo = (erro[NSAppleScript.errorNumber] as? Int) ?? 0
+            DispatchQueue.main.async {
+                self?.doneBanner = codigo == -1743
+                    ? "Libere Automação → \(alvo) nos Ajustes"
+                    : "Não achei a aba no \(alvo)"
+            }
         }
     }
 
