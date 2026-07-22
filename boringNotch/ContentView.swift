@@ -371,7 +371,9 @@ struct ContentView: View {
                                   .fill(.black)
                                   .frame(width: vm.closedNotchSize.width + 10)
 
-                              Text("\(agentWrapper.sessions.count)")
+                              // So quem esta ATIVO conta aqui; a lista da
+                              // ilha guarda as encerradas, a pill nao.
+                              Text("\(agentWrapper.workingCount + agentWrapper.waitingCount)")
                                   .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                   .foregroundColor(.white.opacity(0.6))
                                   .frame(width: 110, alignment: .trailing)
@@ -827,6 +829,8 @@ class AIAgentWrapper: ObservableObject {
     }
 
     private var listener: NWListener?
+    /// Rebaixa pra "livre" quem ficou "trabalhando" sem dar sinal de vida.
+    private var faxineiro: Timer?
     private var activeConnection: NWConnection?
     /// Socket de quem esta esperando resposta, por sessao. Sem isso, dois CLIs
     /// pedindo permissao ao mesmo tempo fariam o clique ir pro socket errado.
@@ -902,6 +906,17 @@ class AIAgentWrapper: ObservableObject {
         } catch {
             print("Failed to start server: \(error)")
         }
+
+        // Sessao interrompida com Esc/Ctrl+C nao manda Stop nem
+        // SessionEnd: sem batimento ha 10 min, "trabalhando" e mentira.
+        faxineiro = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let limite = Date().addingTimeInterval(-600)
+            for i in self.sessions.indices
+            where self.sessions[i].state == .working && self.sessions[i].updatedAt < limite {
+                self.sessions[i].state = .idle
+            }
+        }
     }
     
     private func handleConnection(_ connection: NWConnection) {
@@ -967,6 +982,10 @@ class AIAgentWrapper: ObservableObject {
                                 tty: dict["tty"] as? String ?? "",
                                 term: dict["term"] as? String ?? ""
                             )
+                            // SessionEnd: o CLI ja foi embora. So pinta a
+                            // linha de "encerrada" -- sem foco, banner nem
+                            // painel de um morto.
+                            if state == .offline { return }
                             // Aviso passivo nao rouba o foco de quem esta travado esperando.
                             if self?.focusedSession?.isWaiting != true {
                                 self?.focusedSessionID = sessionID

@@ -272,6 +272,11 @@ def main():
         # que os batimentos de tool call passarem por cima da mensagem.
         if evento == "UserPromptSubmit":
             pacote["prompt"] = extra
+        # Um turno longo dispara dezenas de batimentos e nenhum Stop:
+        # sem isso a capsula de quota congela justo enquanto o CLI mais
+        # gasta. O cache de 60s do uso() segura o custo.
+        if fonte == "claude":
+            pacote["usage"] = uso()
         enviar(pacote)
         return
 

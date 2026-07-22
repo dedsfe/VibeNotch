@@ -192,7 +192,7 @@ def descobrir_tty():
     return ""
 
 
-def perguntar(texto, permissao, linhas_diff):
+def perguntar(texto, permissao, linhas_diff, sessao):
     """Devolve "allow", "always", "deny" ou None (app fora do ar)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(CONNECT_TIMEOUT)
@@ -207,6 +207,11 @@ def perguntar(texto, permissao, linhas_diff):
             "message": texto,
             "rule": permissao,
             "diff": linhas_diff,
+            # Sem o id, todo pedido vira a MESMA chave "anon-claude" na
+            # ilha: dois chats pedindo juntos e o segundo derruba o
+            # socket do primeiro, que cai pro prompt do terminal.
+            "session": sessao,
+            "source": os.environ.get("AINOTCH_SOURCE", "claude"),
             "tty": descobrir_tty(),
             "term": os.environ.get("TERM_PROGRAM", ""),
         }).encode())
@@ -236,7 +241,10 @@ def main():
         return
 
     permissao = regra(payload)
-    decisao = perguntar(resumo(payload), permissao, diff(payload))
+    decisao = perguntar(
+        resumo(payload), permissao, diff(payload),
+        payload.get("session_id", ""),
+    )
     if decisao is None:
         return  # sem saida = Claude Code pergunta do jeito dele
 
