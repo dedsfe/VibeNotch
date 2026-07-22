@@ -1336,6 +1336,24 @@ struct AISession: Identifiable {
     var updatedAt: Date = Date()
 
     var isWaiting: Bool { state == .waiting }
+
+    /// Nome curto do terminal (do TERM_PROGRAM), ou nil quando desconhecido
+    /// -- nesse caso a linha nao mostra badge nenhum.
+    var terminalLabel: String? {
+        switch term {
+        case "Apple_Terminal": return "Terminal"
+        case "iTerm.app": return "iTerm"
+        case "vscode": return "VS Code"
+        case "ghostty": return "Ghostty"
+        case "WarpTerminal": return "Warp"
+        case "WezTerm": return "WezTerm"
+        case "Hyper": return "Hyper"
+        case "Tabby": return "Tabby"
+        case "kitty": return "kitty"
+        case "": return nil
+        default: return term
+        }
+    }
 }
 
 /// Utilizacao 5h/7d de um provedor. -1 = sem dado naquela janela.
@@ -1385,6 +1403,18 @@ struct AISessionRow: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.white)
                 .fixedSize()
+
+            // Qual terminal roda essa sessao: distingue agentes iguais
+            // (dois Claude) rodando em janelas diferentes.
+            if let etiqueta = session.terminalLabel {
+                Text(etiqueta)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.55))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
+                    .fixedSize()
+            }
 
             // Assunto da conversa diz mais que a pasta; a pasta so entra
             // quando o CLI ainda nao nomeou o papo.
